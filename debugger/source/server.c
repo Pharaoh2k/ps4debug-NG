@@ -52,11 +52,14 @@ int cmd_handler(int fd, struct cmd_packet *packet) {
             w = get_fw_version();
             net_send_all(fd, &w, sizeof(w));
             return 0;
-        case CMD_BRANDING:
-            len = strlen(PACKET_BRANDING);
+        case CMD_BRANDING: {
+
+            static const char brand[] = PACKET_BRANDING "\0" "1.0";
+            len = (uint32_t)(sizeof(brand) - 1);
             net_send_all(fd, &len, sizeof(uint32_t));
-            net_send_all(fd, PACKET_BRANDING, len);
+            net_send_all(fd, brand, len);
             return 0;
+        }
         case CMD_PLATFORM_ID:
 
             w = 4;

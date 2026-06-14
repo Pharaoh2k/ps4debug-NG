@@ -23,6 +23,7 @@ int proc_disasm_region_handle(int fd, struct cmd_packet *packet);
 int proc_extract_code_xrefs_handle(int fd, struct cmd_packet *packet);
 int proc_find_xrefs_to_handle(int fd, struct cmd_packet *packet);
 int proc_write_handle(int fd, struct cmd_packet *packet);
+int proc_write_multi_handle(int fd, struct cmd_packet *packet);
 int proc_maps_handle(int fd, struct cmd_packet *packet);
 int proc_install_handle(int fd, struct cmd_packet *packet);
 int proc_call_handle(int fd, struct cmd_packet *packet);

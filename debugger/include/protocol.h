@@ -7,8 +7,10 @@
 #include "errno.h"
 #include "kdbg.h"
 
+#include "../../version.h"
+
 #define PACKET_VERSION          "1.3"
-#define PACKET_BRANDING         "ps4debug-NG by OSR v1.2.2"
+#define PACKET_BRANDING         "ps4debug-NG by OSR v" PS4DEBUG_NG_VERSION_STR
 #define PACKET_MAGIC            0xFFAABBCC
 
 #define CMD_VERSION             0xBD000001
@@ -168,6 +170,16 @@ struct cmd_proc_write_packet {
     uint32_t length;
 } __attribute__((packed));
 #define CMD_PROC_WRITE_PACKET_SIZE 16
+
+struct cmd_proc_write_multi_packet {
+    uint32_t pid;
+    uint32_t count;
+    uint32_t flags;
+} __attribute__((packed));
+#define CMD_PROC_WRITE_MULTI_PACKET_SIZE 12
+#define PROC_WRITE_MULTI_F_STATUS   0x1u
+#define PROC_WRITE_MULTI_MAX_COUNT  0xFFFFu
+#define PROC_WRITE_MULTI_MAX_ENTRY  0x100000u
 
 struct cmd_proc_maps_packet {
     uint32_t pid;

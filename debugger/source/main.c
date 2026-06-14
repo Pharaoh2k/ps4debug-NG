@@ -9,6 +9,24 @@
 
 extern void run_init_array(void);
 
+static int ps4debug_already_running(void) {
+    int fd = sceNetSocket("guard", AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return 0;
+    }
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_len         = sizeof(sa);
+    sa.sin_family      = AF_INET;
+    sa.sin_port        = sceNetHtons(SERVER_PORT);
+    sa.sin_addr.s_addr = 0x0100007Fu;
+
+    int rc = sceNetConnect(fd, (struct sockaddr *)&sa, sizeof(sa));
+    sceNetSocketClose(fd);
+    return (rc == 0);
+}
+
 int _main(void) {
 
     initKernel();
@@ -20,6 +38,11 @@ int _main(void) {
     run_init_array();
 
     sceKernelSleep(2);
+
+    if (ps4debug_already_running()) {
+        sceSysUtilSendSystemNotificationWithText(222, "ps4debug-NG is already running - injection skipped");
+        return 0;
+    }
 
     sys_console_cmd(SYS_CONSOLE_CMD_JAILBREAK, NULL);
 
@@ -35,7 +58,7 @@ int _main(void) {
 
         if (strlen(ip_buf) > 4) {
 
-            sceSysUtilSendSystemNotificationWithText(222, "ps4debug-NG by OSR v1.2.2\nBased on source by golden\n\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0Inspired by\nCtn, SiSTRo & DeathRGH\n\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xE2\x9D\xA4\xE2\x9D\xA4\xE2\x9D\xA4\xE2\x9D\xA4");
+            sceSysUtilSendSystemNotificationWithText(222, PACKET_BRANDING "\nBased on source by golden\n\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0Inspired by\nCtn, SiSTRo & DeathRGH\n\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xE2\x9D\xA4\xE2\x9D\xA4\xE2\x9D\xA4\xE2\x9D\xA4");
             retry = 0;
             start_server();
             continue;
@@ -44,7 +67,7 @@ int _main(void) {
         int next = retry + 1;
         if (retry == 0) {
 
-            sceSysUtilSendSystemNotificationWithText(222, "ps4debug-ng by OpenSourcerer v1.2.2 disconnected.");
+            sceSysUtilSendSystemNotificationWithText(222, "ps4debug-ng by OpenSourcerer v" PS4DEBUG_NG_VERSION_STR " disconnected.");
             sceKernelSleep(2);
         } else if (next <= 99) {
             sceKernelSleep(2);

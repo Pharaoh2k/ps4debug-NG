@@ -477,6 +477,89 @@ int proc_write_handle(int fd, struct cmd_packet *packet) {
     return 0;
 }
 
+int proc_write_multi_handle(int fd, struct cmd_packet *packet) {
+    struct cmd_proc_write_multi_packet *mp =
+        (struct cmd_proc_write_multi_packet *)packet->data;
+    if (!mp) {
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+
+    uint32_t pid         = mp->pid;
+    uint32_t count       = mp->count;
+    int      want_status = (mp->flags & PROC_WRITE_MULTI_F_STATUS) ? 1 : 0;
+
+    if (count > PROC_WRITE_MULTI_MAX_COUNT) {
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
+    unsigned char *buf = (unsigned char *)net_alloc_buffer(0x10000);
+    if (!buf) {
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+
+    unsigned char *status = NULL;
+    if (want_status && count > 0) {
+        status = (unsigned char *)net_alloc_buffer(count);
+        if (!status) {
+            free(buf);
+            net_send_int32(fd, CMD_DATA_NULL);
+            return 1;
+        }
+    }
+
+    net_send_int32(fd, CMD_SUCCESS);
+
+    for (uint32_t i = 0; i < count; i++) {
+        unsigned char hdr[12];
+        if (net_recv_all(fd, hdr, 12, 1) < 0) {
+
+            if (status) free(status);
+            free(buf);
+            return 1;
+        }
+        uint64_t addr;
+        uint32_t len32;
+        memcpy(&addr,  hdr,     8);
+        memcpy(&len32, hdr + 8, 4);
+
+        if (len32 > PROC_WRITE_MULTI_MAX_ENTRY) {
+
+            if (status) free(status);
+            free(buf);
+            net_send_int32(fd, CMD_ERROR);
+            return 1;
+        }
+
+        uint64_t length = len32;
+        uint64_t a      = addr;
+        unsigned char failed = 0;
+        while (length > 0) {
+            uint32_t toRecv = length > 0x10000u ? 0x10000u : (uint32_t)length;
+            if (net_recv_all(fd, buf, (int)toRecv, 1) < 0) {
+                if (status) free(status);
+                free(buf);
+                return 1;
+            }
+            if (sys_proc_rw(pid, a, buf, toRecv, 1) != 0)
+                failed = 1;
+            a      += toRecv;
+            length -= toRecv;
+        }
+        if (status) status[i] = failed;
+    }
+
+    if (status) {
+        net_send_all(fd, status, (int)count);
+        free(status);
+    }
+    net_send_int32(fd, CMD_SUCCESS);
+    free(buf);
+    return 0;
+}
+
 int proc_maps_handle(int fd, struct cmd_packet *packet) {
     struct cmd_proc_maps_packet *mp;
     struct sys_proc_vm_map_args args;
@@ -2257,6 +2340,7 @@ int proc_handle(int fd, struct cmd_packet *packet) {
         case CMD_PROC_READ:           return proc_read_handle(fd, packet);
         case CMD_PROC_READ_STACK:     return proc_read_stack_handle(fd, packet);
         case CMD_PROC_WRITE:          return proc_write_handle(fd, packet);
+        case 0xBDAACC04u:             return proc_write_multi_handle(fd, packet);
         case CMD_PROC_MAPS:           return proc_maps_handle(fd, packet);
         case CMD_PROC_INTALL:         return proc_install_handle(fd, packet);
         case CMD_PROC_CALL:           return proc_call_handle(fd, packet);

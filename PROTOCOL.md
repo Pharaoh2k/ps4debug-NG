@@ -14,7 +14,7 @@ citations. Nothing is summarized from external documentation.
 | Symbol              | Value                                | Source                     |
 |---------------------|--------------------------------------|----------------------------|
 | `PACKET_VERSION`    | `"1.3"`                              | protocol.h:11              |
-| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.2.1"`        | protocol.h:12              |
+| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.2.3\01.0"`   | protocol.h:12 (+ capability level, see 2.1) |
 | `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:13              |
 | `BROADCAST_MAGIC`   | `0xFFFFAAAA`                         | server.h:19                |
 
@@ -165,7 +165,14 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 
 #### `CMD_BRANDING = 0xBD000501`
 - **Request body:** none.
-- **Response:** `uint32_t length`, then `length` bytes of `PACKET_BRANDING`.
+- **Response:** `uint32_t length`, then `length` bytes: the human branding string
+  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.2.3"`), a single `NUL`, then a
+  **capability level** string (`"1.0"`), with no trailing NUL.
+- **Capability level:** C-string clients read up to the first `NUL` and see only
+  the unchanged brand; capability-aware clients read past the `NUL` to get the
+  level and gate features on it (e.g. `0xBDAACC04` bulk write). Built from
+  `PACKET_BRANDING "\0" "1.0"` in `server.c` - the literals are split so `\0` is a
+  NUL byte, not the octal escape `\01`. Bump the level as new capabilities land.
 
 #### `CMD_PLATFORM_ID = 0xBD000502`
 - **Request body:** none.
@@ -200,6 +207,25 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 - **Trailing data:** `length` bytes to write.
 - **Response:** `CMD_SUCCESS`.
 - **Kernel path:** `sys_proc_rw(..., write=1)`.
+
+#### `0xBDAACC04` (`proc_write_multi_handle`)
+Bulk write - the write counterpart to `CMD_PROC_SCAN_GET` (bulk read). Collapses a
+freeze / multi-poke loop of N single `CMD_PROC_WRITE`s into one exchange.
+Dispatched raw (no name macro); **not** auth-gated (mirrors the single write).
+- **Request body:** `struct cmd_proc_write_multi_packet` (12 bytes,
+  `{ uint32_t pid; uint32_t count; uint32_t flags; }`). `flags` bit 0
+  (`PROC_WRITE_MULTI_F_STATUS`) requests a per-entry status array in the response.
+- **Trailing data:** after the server's first `CMD_SUCCESS`, the client streams
+  `count` entries, each `{ uint64_t address; uint32_t length; <length> bytes }`
+  concatenated. Per-entry `length` capped at `0x100000`; `count` at `0xFFFF`.
+- **Response:** `CMD_SUCCESS` (ack), the server applies each entry via
+  `sys_proc_rw(..., write=1)` in 64 KiB chunks, then - if `flags` bit 0 was set -
+  a `count`-byte status array (one byte per entry, `0` = ok, `1` = write failed),
+  then a trailing `CMD_SUCCESS`. **Two** status words, plus the optional array
+  between them.
+- **Semantics:** best-effort and non-atomic - a failed entry does not stop the
+  rest. A `count`/`length` cap violation makes the server reply `CMD_ERROR` and
+  abort the command. Status words are sent raw (`CMD_SUCCESS = 0x80000000`).
 
 #### `CMD_PROC_MAPS = 0xBDAA0004` (proc.c:434-477)
 - **Request body:** `struct cmd_proc_maps_packet` (4 bytes, just `pid`).
@@ -332,7 +358,7 @@ the `CMD_BRANDING` version string (added in v1.2.2).
   u32 n_frames
   per frame {
       u64 rbp; u64 rsp; u64 saved_rbp; u64 ret_addr;
-      u32 flags;            // bit0: frame-locals omitted (oversized/invalid) — read rsp..rbp yourself
+      u32 flags;            // bit0: frame-locals omitted (oversized/invalid) - read rsp..rbp yourself
       u32 frame_locals_len;
       u32 code_len;         // bytes of code at (ret_addr - 10); 0 if unavailable
       u8  frame_locals[frame_locals_len];
@@ -435,7 +461,7 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 - **Request body:** `struct cmd_debug_watchpt_packet` (24 bytes):
   `{index, enabled, length, breaktype, address}`.
 - **Response:** `CMD_SUCCESS` or `CMD_INVALID_INDEX`.
-- **Backend:** hardware breakpoint via DR0–DR3 / DR7. `MAX_WATCHPOINTS = 4`
+- **Backend:** hardware breakpoint via DR0-DR3 / DR7. `MAX_WATCHPOINTS = 4`
   (protocol.h:439). `breaktype` uses `DBREG_DR7_*` encoding (debug.h:119-126):
   `EXEC=0`, `WRONLY=1`, `RDWR=3`; length `1/2/4/8` via `DBREG_DR7_LEN_*`.
 
@@ -560,7 +586,7 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 #### `0xBDDD0006` - foreground-app metadata (console.c, `console_foreground_app_handle`)
 Identify the currently-foregrounded game and return its metadata (pid, titleid,
 contentid, process name, and version). Resolves the version from the title's
-`param.sfo`. **Raw literal in `console_handle`'s switch — no `CMD_*` macro**
+`param.sfo`. **Raw literal in `console_handle`'s switch - no `CMD_*` macro**
 (same rationale as `0xBDAA0024`).
 - **Request body:** none.
 - **Response:** `CMD_SUCCESS`, `struct cmd_console_foreground_app_response` (132 bytes):
@@ -634,6 +660,7 @@ clients cannot invoke it directly.
 | `0xBDAA0001` | `CMD_PROC_LIST`                  | `proc_list_handle`              |       |
 | `0xBDAA0002` | `CMD_PROC_READ`                  | `proc_read_handle`              |       |
 | `0xBDAA0003` | `CMD_PROC_WRITE`                 | `proc_write_handle`             |       |
+| `0xBDAACC04` | (bulk write, no name macro)      | `proc_write_multi_handle`       |       |
 | `0xBDAA0004` | `CMD_PROC_MAPS`                  | `proc_maps_handle`              |       |
 | `0xBDAA0005` | `CMD_PROC_INTALL`                | `proc_install_handle`           |       |
 | `0xBDAA0006` | `CMD_PROC_CALL`                  | `proc_call_handle`              |       |

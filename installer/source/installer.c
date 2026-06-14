@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "installer.h"
+#include "../../version.h"
 
 extern uint8_t kernelelf[];
 extern int32_t kernelelf_size;
@@ -799,6 +800,6 @@ int runinstaller() {
         return 1;
     }
 
-    printf("[ps4debug-ng] PS4Debug-NG by OSR v1.2.2\n");
+    printf("[ps4debug-ng] PS4Debug-NG by OSR v" PS4DEBUG_NG_VERSION_STR "\n");
     return 0;
 }
