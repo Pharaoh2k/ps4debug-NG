@@ -26,7 +26,7 @@ struct server_client *alloc_client();
 void free_client(struct server_client *svc);
 
 int handle_version(int fd, struct cmd_packet *packet);
-int cmd_handler(int fd, struct cmd_packet *packet);
+int cmd_handler(int fd, struct cmd_packet *packet, unsigned char client_idx);
 int handle_client(struct server_client *svc);
 
 void configure_socket(int fd);

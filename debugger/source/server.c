@@ -25,6 +25,12 @@ void free_client(struct server_client *svc) {
         debug_full_teardown(svc);
     }
 
+    long slot = svc - servclients;
+    if (slot >= 0 && slot < SERVER_MAXCLIENTS) {
+        turboscan_session_free_idx((unsigned char)slot);
+        turboscan_alias_free_idx((unsigned char)slot);
+    }
+
     memset(svc, NULL, sizeof(struct server_client));
 }
 
@@ -37,7 +43,7 @@ int handle_version(int fd, struct cmd_packet *packet) {
 
 extern uint16_t get_fw_version(void);
 
-int cmd_handler(int fd, struct cmd_packet *packet) {
+int cmd_handler(int fd, struct cmd_packet *packet, unsigned char client_idx) {
     uint16_t w;
     uint32_t len;
 
@@ -71,7 +77,7 @@ int cmd_handler(int fd, struct cmd_packet *packet) {
     }
 
     if (VALID_PROC_CMD(packet->cmd)) {
-        return proc_handle(fd, packet);
+        return proc_handle(fd, packet, client_idx);
     } else if (VALID_DEBUG_CMD(packet->cmd)) {
         return debug_handle(fd, packet);
     } else if (VALID_KERN_CMD(packet->cmd)) {
@@ -92,6 +98,8 @@ int handle_client(struct server_client *svc) {
     int r;
 
     fd = svc->fd;
+
+    unsigned char client_idx = (unsigned char)(svc - servclients);
 
     struct timeval tv;
     memset(&tv, NULL, sizeof(tv));
@@ -172,7 +180,7 @@ int handle_client(struct server_client *svc) {
         if (packet.cmd == CMD_DEBUG_ATTACH) {
             r = debug_attach_handle_svc(svc, &packet);
         } else {
-            r = cmd_handler(fd, &packet);
+            r = cmd_handler(fd, &packet, client_idx);
         }
 
         if (data) {

@@ -4,6 +4,8 @@
 
 #include "Zydis.h"
 #include "aob_scan.h"
+#include "proc_ptwalk.h"
+#include "scan_alias.h"
 
 #define DISASM_READ_CHUNK  0x10000
 
@@ -2395,13 +2397,103 @@ int proc_scan_get_handle(int fd, struct cmd_packet *packet) {
     return 0;
 }
 
-int proc_handle(int fd, struct cmd_packet *packet) {
+int proc_ptwalk_test_handle(int fd, struct cmd_packet *packet) {
+    struct ptw_test_req { uint32_t pid; uint64_t va; } __attribute__((packed));
+    struct ptw_test_req *r = (struct ptw_test_req *)packet->data;
+    if (!r) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
+
+    uint64_t out[12];
+    memset(out, 0, sizeof(out));
+    out[0] = (uint64_t)(int64_t)ptw_discover();
+    out[1] = proc_ptwalk_dmap_base();
+
+    uint64_t k = 0, v = 0; int lvl = -1;
+    out[2] = (uint64_t)(int64_t)proc_ptwalk_leaf_addr(r->pid, r->va, &k, &v, &lvl);
+    out[3] = k;
+    out[4] = v;
+    out[5] = (uint64_t)(int64_t)lvl;
+
+    int huge = 0; uint64_t pb = 0, lk = 0, pte = 0;
+    out[6] = (uint64_t)(int64_t)proc_ptwalk_span_resolve(r->pid, r->va & ~0x1FFFFFULL,
+                                                         &huge, &pb, &lk, &pte);
+    out[7]  = (uint64_t)huge;
+    out[8]  = pb;
+    out[9]  = lk;
+    out[10] = pte;
+    out[11] = r->va;
+
+    net_send_int32(fd, CMD_SUCCESS);
+    net_send_all(fd, out, sizeof(out));
+    return 0;
+}
+
+int proc_alias_test_handle(int fd, struct cmd_packet *packet) {
+    struct alias_test_req { uint32_t pid; uint64_t addr; uint32_t len; } __attribute__((packed));
+    struct alias_test_req *r = (struct alias_test_req *)packet->data;
+    if (!r) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
+
+    uint32_t len = r->len;
+    if (len == 0 || len > 0x4000) len = 0x1000;
+
+    uint64_t out[12];
+    memset(out, 0, sizeof(out));
+    out[0] = (uint64_t)(int64_t)ptw_discover();
+    out[1] = proc_ptwalk_dmap_base();
+
+    long mret = syscall(477, 0L, 0x200000L, 3L, 0x1002L, -1L, 0L);
+    out[2] = (uint64_t)mret;
+    if (mret != -1 && mret != 0) syscall(73, mret, 0x200000L);
+
+    scan_alias_ctx *ctx = scan_alias_begin(r->pid, 0);
+    if (ctx) {
+        out[3] = 1;
+        uint64_t mlen = 0;
+        const void *p = scan_alias_map(ctx, r->addr, len, &mlen);
+        if (p) {
+            out[4] = 1;
+            uint8_t *am = (uint8_t *)malloc(len);
+            uint8_t *mm = (uint8_t *)malloc(len);
+            if (am && mm) {
+                memcpy(am, p, len);
+                sys_proc_rw(r->pid, r->addr, mm, len, 0);
+                uint64_t off = 0; int match = 1;
+                for (uint64_t i = 0; i < len; i++)
+                    if (am[i] != mm[i]) { match = 0; off = i; break; }
+                out[5] = (uint64_t)match;
+                out[6] = off;
+                out[7] = len;
+                memcpy(&out[8], am, 8);
+                memcpy(&out[9], mm, 8);
+            }
+            if (am) free(am);
+            if (mm) free(mm);
+            scan_alias_release(ctx);
+        }
+        scan_alias_end(ctx);
+    }
+
+    net_send_int32(fd, CMD_SUCCESS);
+    net_send_all(fd, out, sizeof(out));
+    return 0;
+}
+
+int proc_handle(int fd, struct cmd_packet *packet, unsigned char client_idx) {
     switch(packet->cmd) {
         case CMD_PROC_LIST:           return proc_list_handle(fd, packet);
         case CMD_PROC_READ:           return proc_read_handle(fd, packet);
         case CMD_PROC_READ_STACK:     return proc_read_stack_handle(fd, packet);
         case CMD_PROC_WRITE:          return proc_write_handle(fd, packet);
         case 0xBDAACC04u:             return proc_write_multi_handle(fd, packet);
+        case 0xBDAACC10u:             return proc_turboscan_caps_handle(fd, packet);
+        case 0xBDAACC11u:             return proc_turboscan_start_handle(fd, packet, client_idx);
+        case 0xBDAACC12u:             return proc_turboscan_count_handle(fd, packet, client_idx);
+        case 0xBDAACC13u:             return proc_turboscan_get_handle(fd, packet, client_idx);
+        case 0xBDAACC14u:             return proc_turboscan_end_handle(fd, packet, client_idx);
+        case 0xBDAACC15u:             return proc_turboscan_config_handle(fd, packet);
+        case 0xBDAACC16u:             return proc_turboscan_regions_handle(fd, packet);
+        case 0xBDAACC30u:             return proc_ptwalk_test_handle(fd, packet);
+        case 0xBDAACC31u:             return proc_alias_test_handle(fd, packet);
+        case 0xBDAACC32u:             return proc_turboscan_fileprobe_handle(fd, packet);
         case CMD_PROC_MAPS:           return proc_maps_handle(fd, packet);
         case CMD_PROC_INTALL:         return proc_install_handle(fd, packet);
         case CMD_PROC_CALL:           return proc_call_handle(fd, packet);

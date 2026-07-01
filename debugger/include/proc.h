@@ -45,7 +45,22 @@ int proc_scan_get_handle(int fd, struct cmd_packet *packet);
 
 int proc_assemble_handle(int fd, struct cmd_packet *packet);
 
-int proc_handle(int fd, struct cmd_packet *packet);
+int proc_turboscan_caps_handle(int fd, struct cmd_packet *packet);
+int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char client_idx);
+int proc_turboscan_count_handle(int fd, struct cmd_packet *packet, unsigned char client_idx);
+int proc_turboscan_get_handle(int fd, struct cmd_packet *packet, unsigned char client_idx);
+int proc_turboscan_end_handle(int fd, struct cmd_packet *packet, unsigned char client_idx);
+int proc_turboscan_config_handle(int fd, struct cmd_packet *packet);
+int proc_turboscan_regions_handle(int fd, struct cmd_packet *packet);
+
+int proc_turboscan_fileprobe_handle(int fd, struct cmd_packet *packet);
+
+void turboscan_session_free_idx(unsigned char idx);
+void turboscan_alias_free_idx(unsigned char idx);
+
+void turboscan_startup_cleanup(void);
+
+int proc_handle(int fd, struct cmd_packet *packet, unsigned char client_idx);
 
 extern uint32_t g_proc_auth_bits;
 

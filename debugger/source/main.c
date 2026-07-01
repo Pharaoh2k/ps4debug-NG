@@ -49,6 +49,8 @@ int _main(void) {
     mkdir("/update/PS4UPDATE.PUP", 0777);
     mkdir("/update/PS4UPDATE.PUP.net.temp", 0777);
 
+    turboscan_startup_cleanup();
+
     int retry = 0;
     char ip_buf[16];
 

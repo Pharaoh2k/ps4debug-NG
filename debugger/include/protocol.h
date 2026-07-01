@@ -297,6 +297,99 @@ struct cmd_proc_scan_count_packet {
 } __attribute__((packed));
 #define CMD_PROC_SCAN_COUNT_PACKET_SIZE 18
 
+#define TSE_SIMD_COMPARE      0x00000001u
+#define TSE_ALIASING          0x00000002u
+#define TSE_SERVER_RESIDENT   0x00000004u
+#define TSE_SNAPSHOT          0x00000008u
+#define TSE_SNAPSHOT_SEGMENTS 0x00000010u
+#define TSE_SNAPSHOT_CONFIG   0x00000020u
+#define TSE_SNAPSHOT_FIRST    0x00000040u
+#define TSE_SNAPSHOT_PREVIOUS 0x00000080u
+#define TSE_PARALLEL_COMPARE  0x00000100u
+#define TSE_RESCAN_ALIASING   0x00000200u
+
+#define TS_USE_ALIASING           0x00000001u
+#define TS_SERVER_RESIDENT        0x00000002u
+#define TS_SNAPSHOT               0x00000004u
+#define TS_SNAPSHOT_INCLUDE_ZEROS 0x00000008u
+#define TS_SNAPSHOT_SEGMENTS      0x00000010u
+#define TS_SNAPSHOT_KEEP_FIRST    0x00000020u
+#define TS_SNAPSHOT_KEEP_PREVIOUS 0x00000040u
+#define TS_PARALLEL_COMPARE       0x00000080u
+#define TS_RESCAN_ALIASING        0x00000100u
+
+struct cmd_proc_turboscan_start_packet {
+    uint32_t pid;
+    uint64_t address;
+    uint32_t length;
+    uint8_t  valueType;
+    uint8_t  compareType;
+    uint8_t  alignment;
+    uint32_t lenData;
+    uint32_t flags;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_config_packet {
+    uint32_t ram_thresh_mb;
+    uint32_t spill_path_len;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_caps_response {
+    uint32_t version;
+    uint32_t engines;
+    uint32_t max_threads;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_regions_packet {
+    uint32_t pid;
+    uint32_t max;
+    uint32_t probe_bytes;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_region_info {
+    uint64_t start;
+    uint64_t end;
+    uint32_t prot;
+    uint32_t flags;
+    uint32_t mbps;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_count_packet {
+    uint32_t pid;
+    uint64_t base_address;
+    uint8_t  valueType;
+    uint8_t  compareType;
+    uint32_t lenData;
+    uint32_t flags;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_resident_summary {
+    uint32_t resident_stored;
+    uint64_t count;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_get_packet {
+    uint32_t start_index;
+    uint32_t count;
+    uint32_t flags;
+} __attribute__((packed));
+
+struct cmd_proc_turboscan_snap_segment {
+    uint64_t address;
+    uint32_t length;
+} __attribute__((packed));
+struct cmd_proc_turboscan_snap_plan {
+    uint64_t slot_count;
+    uint64_t total_bytes;
+} __attribute__((packed));
+struct cmd_proc_turboscan_snap_summary {
+    uint32_t snapshot_ok;
+    uint64_t survivor_count;
+} __attribute__((packed));
+
 struct cmd_proc_scan_aob_packet {
     uint32_t pid;
     uint64_t address;
