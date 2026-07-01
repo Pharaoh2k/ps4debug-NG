@@ -3,6 +3,7 @@
 #include "proc.h"
 
 #include "Zydis.h"
+#include "aob_scan.h"
 
 #define DISASM_READ_CHUNK  0x10000
 
@@ -1787,6 +1788,20 @@ chunk_done:
     return 0;
 }
 
+#define AOB_SCAN_THREADS 6
+
+struct aob_ps4_fill { uint64_t pid; uint64_t base; };
+
+static void aob_ps4_fill_fn(void *ctx, uint64_t off, uint8_t *buf, uint32_t len) {
+    struct aob_ps4_fill *f = (struct aob_ps4_fill *)ctx;
+    sys_proc_rw(f->pid, f->base + off, buf, len, 0);
+}
+
+static void *aob_thread(void *arg) {
+    aob_scan_range((struct aob_worker *)arg);
+    return NULL;
+}
+
 int proc_scan_aob_multi_handle(int fd, struct cmd_packet *packet) {
     struct cmd_proc_scan_aob_multi_packet *mp = (struct cmd_proc_scan_aob_multi_packet *)packet->data;
     if (!mp) {
@@ -1828,100 +1843,146 @@ int proc_scan_aob_multi_handle(int fd, struct cmd_packet *packet) {
         return 1;
     }
 
-    uint32_t chunkSize = 0x8000;
-    if (chunkSize < max_plen) chunkSize = max_plen;
-    uint8_t *readBuf = (uint8_t *)net_alloc_buffer(chunkSize);
-    if (!readBuf) {
-        free(blob);
-        net_send_int32(fd, CMD_DATA_NULL);
-        return 1;
-    }
-    uint64_t *output = (uint64_t *)net_alloc_buffer((size_t)pat_count * 8);
-    if (!output) {
-        free(readBuf); free(blob);
-        net_send_int32(fd, CMD_DATA_NULL);
-        return 1;
-    }
-    uint64_t *match_counts = (uint64_t *)net_alloc_buffer((size_t)pat_count * 8);
-    if (!match_counts) {
-        free(output); free(readBuf); free(blob);
-        net_send_int32(fd, CMD_DATA_NULL);
-        return 1;
-    }
-    memset(output, 0, (size_t)pat_count * 8);
-    memset(match_counts, 0, (size_t)pat_count * 8);
+    uint32_t chunkSize = 0x10000;
 
-    net_send_int32(fd, CMD_SUCCESS);
-
+    struct aob_pat *pats = NULL;
+    uint32_t *bidx = NULL, *widx = NULL, *slot_off = NULL;
+    uint64_t *output = NULL;
+    uint8_t  *readbufs = NULL, *wdone = NULL;
+    uint64_t *waddrs = NULL;
+    uint32_t *wcounts = NULL;
+    struct aob_dispatch disp;
+    uint32_t total_slots = 0;
+    uint32_t num_workers = 1;
+    uint64_t span = 1;
     bool stop_unique = (mp->stop_flag == 1);
-    uint64_t addr = mp->address;
-    uint64_t remaining = mp->length;
-    uint32_t found_count = 0;
-    uint32_t invalidated_count = 0;
 
-    while (remaining > 0) {
-        uint32_t toRead = chunkSize < remaining ? chunkSize : (uint32_t)remaining;
-        memset(readBuf, 0, toRead);
-        sys_proc_rw(mp->pid, addr, readBuf, toRead, 0);
+    pats     = (struct aob_pat *)net_alloc_buffer((size_t)pat_count * sizeof(struct aob_pat));
+    bidx     = (uint32_t *)net_alloc_buffer((size_t)pat_count * sizeof(uint32_t));
+    widx     = (uint32_t *)net_alloc_buffer((size_t)pat_count * sizeof(uint32_t));
+    slot_off = (uint32_t *)net_alloc_buffer((size_t)(pat_count + 1) * sizeof(uint32_t));
+    output   = (uint64_t *)net_alloc_buffer((size_t)pat_count * 8);
+    if (!pats || !bidx || !widx || !slot_off || !output) goto aob_fail;
 
+    {
         uint32_t cursor = 0;
         for (uint32_t pi = 0; pi < pat_count; pi++) {
-            uint8_t  target_count = blob[cursor];
             uint32_t plen;
             memcpy(&plen, blob + cursor + 1, 4);
             const uint8_t *pat = blob + cursor + 5;
             const uint8_t *msk = pat + plen;
-
-            uint64_t limit = toRead >= plen ? toRead - plen : 0;
-            for (uint64_t j = 0; j <= limit; j++) {
-
-                bool matched = true;
-                for (uint32_t k = 0; k < plen; k++) {
-                    if (readBuf[j+k] != pat[k] && msk[k] == 1) {
-                        matched = false;
-                        break;
-                    }
-                }
-                if (!matched) continue;
-
-                match_counts[pi]++;
-                if (match_counts[pi] == target_count) {
-
-                    output[pi] = addr + j;
-                    found_count++;
-                    if (!stop_unique) break;
-
-                    continue;
-                }
-                if (match_counts[pi] == (uint64_t)target_count + 1 && stop_unique) {
-
-                    output[pi] = 0;
-                    invalidated_count++;
-
-                    break;
-
-                }
-            }
-
+            pats[pi].pat = pat;
+            pats[pi].msk = msk;
+            pats[pi].plen = plen;
+            pats[pi].target_count = blob[cursor];
+            pats[pi].first_fixed = (msk[0] == 1) ? (int16_t)pat[0] : (int16_t)-1;
             cursor += 5 + 2 * plen;
         }
+    }
+    aob_build_dispatch(pats, pat_count, &disp, bidx, widx);
 
-        uint32_t advance = chunkSize - max_plen + 1;
-        addr += advance;
-        if (remaining > advance) remaining -= advance;
-        else remaining = 0;
+    slot_off[0] = 0;
+    for (uint32_t pi = 0; pi < pat_count; pi++)
+        slot_off[pi + 1] = slot_off[pi] + ((uint32_t)pats[pi].target_count + 1);
+    total_slots = slot_off[pat_count];
 
-        if (!stop_unique && found_count >= pat_count) break;
-        if (stop_unique && (found_count + invalidated_count) >= pat_count) break;
+    num_workers = AOB_SCAN_THREADS;
+    if ((uint64_t)num_workers > mp->length) num_workers = (mp->length > 0) ? (uint32_t)mp->length : 1;
+    span = (mp->length + num_workers - 1) / num_workers;
+    if (span == 0) span = 1;
+    num_workers = (uint32_t)((mp->length + span - 1) / span);
+    if (num_workers == 0) num_workers = 1;
+    if (num_workers > AOB_SCAN_THREADS) num_workers = AOB_SCAN_THREADS;
+
+    readbufs = (uint8_t  *)net_alloc_buffer((size_t)num_workers * (chunkSize + max_plen));
+    waddrs   = (uint64_t *)net_alloc_buffer((size_t)num_workers * total_slots * 8);
+    wcounts  = (uint32_t *)net_alloc_buffer((size_t)num_workers * pat_count * sizeof(uint32_t));
+    wdone    = (uint8_t  *)net_alloc_buffer((size_t)num_workers * pat_count);
+    if (!readbufs || !waddrs || !wcounts || !wdone) goto aob_fail;
+
+    net_send_int32(fd, CMD_SUCCESS);
+    memset(output, 0, (size_t)pat_count * 8);
+
+    {
+        struct aob_ps4_fill fillctx;
+        struct aob_worker workers[AOB_SCAN_THREADS];
+        ScePthread tids[AOB_SCAN_THREADS];
+        bool spawned[AOB_SCAN_THREADS];
+        const uint64_t *ca[AOB_SCAN_THREADS];
+        const uint32_t *cc[AOB_SCAN_THREADS];
+
+        fillctx.pid = mp->pid;
+        fillctx.base = mp->address;
+
+        for (uint32_t w = 0; w < num_workers; w++) {
+            uint64_t s = (uint64_t)w * span;
+            uint64_t e = s + span;
+            if (s > mp->length) s = mp->length;
+            if (e > mp->length) e = mp->length;
+            workers[w].pats = pats;
+            workers[w].pat_count = pat_count;
+            workers[w].disp = &disp;
+            workers[w].base_addr = mp->address;
+            workers[w].length = mp->length;
+            workers[w].max_plen = max_plen;
+            workers[w].chunkSize = chunkSize;
+            workers[w].fill = aob_ps4_fill_fn;
+            workers[w].fill_ctx = &fillctx;
+            workers[w].slot_off = slot_off;
+            workers[w].start = s;
+            workers[w].end = e;
+            workers[w].readBuf = readbufs + (size_t)w * (chunkSize + max_plen);
+            workers[w].addrs = waddrs + (size_t)w * total_slots;
+            workers[w].counts = wcounts + (size_t)w * pat_count;
+            workers[w].done = wdone + (size_t)w * pat_count;
+            spawned[w] = false;
+        }
+
+        for (uint32_t w = 1; w < num_workers; w++) {
+            if (scePthreadCreate(&tids[w], NULL, aob_thread, &workers[w], "aobscan") == 0) {
+                spawned[w] = true;
+            }
+        }
+        aob_scan_range(&workers[0]);
+        for (uint32_t w = 1; w < num_workers; w++) {
+            if (spawned[w]) scePthreadJoin(tids[w], NULL);
+            else aob_scan_range(&workers[w]);
+        }
+
+        for (uint32_t w = 0; w < num_workers; w++) {
+            ca[w] = waddrs + (size_t)w * total_slots;
+            cc[w] = wcounts + (size_t)w * pat_count;
+        }
+        aob_merge(pats, pat_count, stop_unique, slot_off, num_workers, ca, cc, output);
     }
 
     net_send_all(fd, output, (int)((size_t)pat_count * 8));
-    free(match_counts);
+    if (wdone) free(wdone);
+    if (wcounts) free(wcounts);
+    if (waddrs) free(waddrs);
+    if (readbufs) free(readbufs);
     free(output);
-    free(readBuf);
+    free(slot_off);
+    free(widx);
+    free(bidx);
+    free(pats);
     free(blob);
     net_send_int32(fd, CMD_SUCCESS);
     return 0;
+
+aob_fail:
+    if (wdone) free(wdone);
+    if (wcounts) free(wcounts);
+    if (waddrs) free(waddrs);
+    if (readbufs) free(readbufs);
+    if (output) free(output);
+    if (slot_off) free(slot_off);
+    if (widx) free(widx);
+    if (bidx) free(bidx);
+    if (pats) free(pats);
+    free(blob);
+    net_send_int32(fd, CMD_DATA_NULL);
+    return 1;
 }
 
 uint32_t g_proc_auth_bits = 0;
