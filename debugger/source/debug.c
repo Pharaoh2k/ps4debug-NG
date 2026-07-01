@@ -89,6 +89,11 @@ static inline int ptrace_ok(int ret) {
     return ret != -1 || errno == 0;
 }
 
+extern int kern_get_fsgsbase(int pid, int lwpid, void *out16);
+extern int kern_set_fsgsbase(int pid, int lwpid, const void *in16);
+extern int kern_get_fpregs(int pid, int lwpid, void *fpu_buf);
+extern int kern_set_fpregs(int pid, int lwpid, const void *fpu_buf);
+
 int g_pending_sig_pid;
 int g_pending_signal;
 long g_last_alive_check;
@@ -758,8 +763,12 @@ int debug_getfpregs_handle(int fd, struct cmd_packet *packet) {
     if (!pp) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
 
     uint8_t buf[848];
-    int r = kern_ptrace(PT_GETFPREGS, (int)*pp, buf, 0);
-    if (!ptrace_ok(r)) { net_send_int32(fd, CMD_ERROR); return 1; }
+    memset(buf, 0, sizeof(buf));
+
+    if (kern_get_fpregs((int)g_debug_ctx.pid, (int)*pp, buf) != 0) {
+        int r = kern_ptrace(PT_GETFPREGS, (int)*pp, buf, 0);
+        if (!ptrace_ok(r)) { net_send_int32(fd, CMD_ERROR); return 1; }
+    }
 
     net_send_int32(fd, CMD_SUCCESS);
     net_send_all(fd, buf, 832);
@@ -767,17 +776,33 @@ int debug_getfpregs_handle(int fd, struct cmd_packet *packet) {
 }
 
 int debug_setfpregs_handle(int fd, struct cmd_packet *packet) {
-    struct setreg_hdr { uint32_t _u; uint32_t length; } __attribute__((packed));
+    struct setreg_hdr { uint32_t lwpid; uint32_t length; } __attribute__((packed));
     struct setreg_hdr *h = (struct setreg_hdr *)packet->data;
     if (!g_debug_ctx.attached) { net_send_int32(fd, CMD_ERROR); return 1; }
     if (!h) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
 
+    uint32_t lwpid  = h->lwpid;
+    uint32_t length = h->length;
+
     net_send_int32(fd, CMD_SUCCESS);
     uint8_t buf[848];
-    if (h->length > sizeof(buf)) { net_send_int32(fd, CMD_TOO_MUCH_DATA); return 1; }
-    net_recv_all(fd, buf, h->length, 1);
-    int r = kern_ptrace(PT_SETFPREGS, (int)g_debug_ctx.pid, buf, 0);
-    net_send_int32(fd, ptrace_ok(r) ? CMD_SUCCESS : CMD_ERROR);
+    if (length > sizeof(buf)) { net_send_int32(fd, CMD_TOO_MUCH_DATA); return 1; }
+
+    memset(buf, 0, sizeof(buf));
+    if (net_recv_all(fd, buf, length, 1) < (int)length) {
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
+    int applied = 0;
+    if (length == 832)
+        applied = (kern_set_fpregs((int)g_debug_ctx.pid, (int)lwpid, buf) == 0);
+    if (!applied) {
+        int r = kern_ptrace(PT_SETFPREGS, (int)g_debug_ctx.pid, buf, 0);
+        if (!ptrace_ok(r)) { net_send_int32(fd, CMD_ERROR); return 1; }
+    }
+
+    net_send_int32(fd, CMD_SUCCESS);
     return 0;
 }
 
@@ -867,6 +892,47 @@ int debug_step_thread_handle(int fd, struct cmd_packet *packet) {
     return 0;
 }
 
+int debug_getfsgsbase_handle(int fd, struct cmd_packet *packet) {
+    uint32_t *pp = (uint32_t *)packet->data;
+    if (!g_debug_ctx.attached) { net_send_int32(fd, CMD_ERROR); return 1; }
+    if (!pp) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
+
+    uint8_t buf[16];
+    memset(buf, 0, sizeof(buf));
+    if (kern_get_fsgsbase((int)g_debug_ctx.pid, (int)*pp, buf) != 0) {
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
+    net_send_int32(fd, CMD_SUCCESS);
+    net_send_all(fd, buf, 16);
+    return 0;
+}
+
+int debug_setfsgsbase_handle(int fd, struct cmd_packet *packet) {
+    struct setreg_hdr { uint32_t lwpid; uint32_t length; } __attribute__((packed));
+    struct setreg_hdr *h = (struct setreg_hdr *)packet->data;
+    if (!g_debug_ctx.attached) { net_send_int32(fd, CMD_ERROR); return 1; }
+    if (!h) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
+    if (h->length != 16) { net_send_int32(fd, CMD_ERROR); return 1; }
+
+    uint8_t buf[16];
+    memset(buf, 0, sizeof(buf));
+    net_send_int32(fd, CMD_SUCCESS);
+    if (net_recv_all(fd, buf, 16, 1) < 16) {
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
+    if (kern_set_fsgsbase((int)g_debug_ctx.pid, (int)h->lwpid, buf) != 0) {
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
+    net_send_int32(fd, CMD_SUCCESS);
+    return 0;
+}
+
 int debug_handle(int fd, struct cmd_packet *packet) {
     switch(packet->cmd) {
 
@@ -884,6 +950,9 @@ int debug_handle(int fd, struct cmd_packet *packet) {
         case CMD_DEBUG_SETFPREGS:        return debug_setfpregs_handle(fd, packet);
         case CMD_DEBUG_GETDBREGS:        return debug_getdbregs_handle(fd, packet);
         case CMD_DEBUG_SETDBREGS:        return debug_setdbregs_handle(fd, packet);
+
+        case 0xBDBB000Eu:                return debug_getfsgsbase_handle(fd, packet);
+        case 0xBDBB000Fu:                return debug_setfsgsbase_handle(fd, packet);
         case CMD_DEBUG_CONTINUE:         return debug_continue_handle(fd, packet);
         case CMD_DEBUG_THREAD_INFO:      return debug_thread_info_handle(fd, packet);
         case CMD_DEBUG_STEP:             return debug_step_handle(fd, packet);
