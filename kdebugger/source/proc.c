@@ -344,6 +344,10 @@ int proc_create_thread(struct proc *p, uint64_t address) {
                 case 1202:
                 case 1250:
                 case 1252:
+                case 1300:
+                case 1302:
+                case 1304:
+                case 1350:
                     _scePthreadAttrInit = entries[i].start + 0x134A0;
                     _scePthreadAttrSetstacksize = entries[i].start + 0x134C0;
                     _scePthreadCreate = entries[i].start + 0x138E0;
@@ -465,6 +469,20 @@ int proc_create_thread(struct proc *p, uint64_t address) {
                     _scePthreadCreate = entries[i].start + 0x9710;
                     _thr_initial = entries[i].start + 0x8E430;
                     break;
+                case 1300:
+                case 1302:
+                case 1304:
+                    _scePthreadAttrInit = entries[i].start + 0xFEC0;
+                    _scePthreadAttrSetstacksize = entries[i].start + 0x15F40;
+                    _scePthreadCreate = entries[i].start + 0x29F30;
+                    _thr_initial = entries[i].start + 0x8E430;
+                    break;
+                case 1350:
+                    _scePthreadAttrInit = entries[i].start + 0x8A80;
+                    _scePthreadAttrSetstacksize = entries[i].start + 0x38B0;
+                    _scePthreadCreate = entries[i].start + 0x16460;
+                    _thr_initial = entries[i].start + 0x8E430;
+                    break;
             }
             break;
         }
@@ -551,6 +569,10 @@ int proc_create_thread(struct proc *p, uint64_t address) {
                 case 1202:
                 case 1250:
                 case 1252:
+                case 1300:
+                case 1302:
+                case 1304:
+                case 1350:
                     _scePthreadAttrInit = entries[i].start + 0x14010;
                     _scePthreadAttrSetstacksize = entries[i].start + 0x14030;
                     _scePthreadCreate = entries[i].start + 0x14450;

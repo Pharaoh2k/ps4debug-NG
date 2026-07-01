@@ -536,6 +536,100 @@ void init_702sdk(uint8_t *kbase) {
     sysents = (void *)(kbase + 0x1125660);
 }
 
+void init_1300sdk(uint8_t *kbase) {
+    Xfast_syscall = (void *)(kbase + 0x1C0);
+    printf = (void *)(kbase + 0x2E0440);
+    malloc = (void *)(kbase + 0x9520);
+    free = (void *)(kbase + 0x96E0);
+    memcpy = (void *)(kbase + 0x2BD4E0);
+    memset = (void *)(kbase + 0x1FA1A0);
+    memcmp = (void *)(kbase + 0x394300);
+    kmem_alloc = (void *)(kbase + 0x465A40);
+    strlen = (void *)(kbase + 0x36AB90);
+    create_thread = (void *)(kbase + 0x4C6C0);
+    kern_reboot = (void *)(kbase + 0x3A1DD0);
+    vm_map_lock_read = (void *)(kbase + 0x2F7110);
+    vm_map_lookup_entry = (void *)(kbase + 0x2F7750);
+    vm_map_unlock_read = (void *)(kbase + 0x2F7160);
+    vm_map_delete = (void *)(kbase + 0x2F9C10);
+    vm_map_protect = (void *)(kbase + 0x2FBF70);
+    vm_map_findspace = (void *)(kbase + 0x2FA1D0);
+    vm_map_insert = (void *)(kbase + 0x2F8310);
+    vm_map_lock = (void *)(kbase + 0x2F6FC0);
+    vm_map_unlock = (void *)(kbase + 0x2F7030);
+    proc_rwmem = (void *)(kbase + 0x366000);
+    disable_console_output = (void *)(kbase + 0x1A47F40);
+    M_TEMP = (void *)(kbase + 0x1520D00);
+    kernel_map = (void *)(kbase + 0x22D1D50);
+    prison0 = (void *)(kbase + 0x111FA18);
+    rootvnode = (void *)(kbase + 0x2136E90);
+    allproc = (void *)(kbase + 0x1B28538);
+    sysents = (void *)(kbase + 0x1102B70);
+}
+
+// 13.02 and 13.04 share an identical kernel layout (verified: every offset matches).
+void init_1304sdk(uint8_t *kbase) {
+    Xfast_syscall = (void *)(kbase + 0x1C0);
+    printf = (void *)(kbase + 0x2E0450);
+    malloc = (void *)(kbase + 0x9520);
+    free = (void *)(kbase + 0x96E0);
+    memcpy = (void *)(kbase + 0x2BD4F0);
+    memset = (void *)(kbase + 0x1FA1B0);
+    memcmp = (void *)(kbase + 0x394310);
+    kmem_alloc = (void *)(kbase + 0x465A50);
+    strlen = (void *)(kbase + 0x36ABA0);
+    create_thread = (void *)(kbase + 0x4C6C0);
+    kern_reboot = (void *)(kbase + 0x3A1DE0);
+    vm_map_lock_read = (void *)(kbase + 0x2F7120);
+    vm_map_lookup_entry = (void *)(kbase + 0x2F7760);
+    vm_map_unlock_read = (void *)(kbase + 0x2F7170);
+    vm_map_delete = (void *)(kbase + 0x2F9C20);
+    vm_map_protect = (void *)(kbase + 0x2FBF80);
+    vm_map_findspace = (void *)(kbase + 0x2FA1E0);
+    vm_map_insert = (void *)(kbase + 0x2F8320);
+    vm_map_lock = (void *)(kbase + 0x2F6FD0);
+    vm_map_unlock = (void *)(kbase + 0x2F7040);
+    proc_rwmem = (void *)(kbase + 0x366010);
+    disable_console_output = (void *)(kbase + 0x1A47F40);
+    M_TEMP = (void *)(kbase + 0x1520D00);
+    kernel_map = (void *)(kbase + 0x22D1D50);
+    prison0 = (void *)(kbase + 0x111FA18);
+    rootvnode = (void *)(kbase + 0x2136E90);
+    allproc = (void *)(kbase + 0x1B28538);
+    sysents = (void *)(kbase + 0x1102B70);
+}
+
+void init_1350sdk(uint8_t *kbase) {
+    Xfast_syscall = (void *)(kbase + 0x1C0);
+    printf = (void *)(kbase + 0x2E0460);
+    malloc = (void *)(kbase + 0x9520);
+    free = (void *)(kbase + 0x96E0);
+    memcpy = (void *)(kbase + 0x2BD500);
+    memset = (void *)(kbase + 0x1FA1C0);
+    memcmp = (void *)(kbase + 0x3946D0);
+    kmem_alloc = (void *)(kbase + 0x465E90);
+    strlen = (void *)(kbase + 0x36AEF0);
+    create_thread = (void *)(kbase + 0x4C6C0);
+    kern_reboot = (void *)(kbase + 0x3A21A0);
+    vm_map_lock_read = (void *)(kbase + 0x2F7470);
+    vm_map_lookup_entry = (void *)(kbase + 0x2F7AB0);
+    vm_map_unlock_read = (void *)(kbase + 0x2F74C0);
+    vm_map_delete = (void *)(kbase + 0x2F9F70);
+    vm_map_protect = (void *)(kbase + 0x2FC2D0);
+    vm_map_findspace = (void *)(kbase + 0x2FA530);
+    vm_map_insert = (void *)(kbase + 0x2F8670);
+    vm_map_lock = (void *)(kbase + 0x2F7320);
+    vm_map_unlock = (void *)(kbase + 0x2F7390);
+    proc_rwmem = (void *)(kbase + 0x366360);
+    disable_console_output = (void *)(kbase + 0x1A47F40);
+    M_TEMP = (void *)(kbase + 0x1520D00);
+    kernel_map = (void *)(kbase + 0x22D1D50);
+    prison0 = (void *)(kbase + 0x111FA18);
+    rootvnode = (void *)(kbase + 0x2136E90);
+    allproc = (void *)(kbase + 0x1B28538);
+    sysents = (void *)(kbase + 0x1102B70);
+}
+
 void init_ksdk() {
     uint64_t kbase = get_kbase();
     cachedKernelBase = kbase;
@@ -588,6 +682,15 @@ void init_ksdk() {
             break;
         case 1250: case 1252:
             init_1252sdk((uint8_t *)kbase);
+            break;
+        case 1300:
+            init_1300sdk((uint8_t *)kbase);
+            break;
+        case 1302: case 1304:
+            init_1304sdk((uint8_t *)kbase);
+            break;
+        case 1350:
+            init_1350sdk((uint8_t *)kbase);
             break;
     }
 }
