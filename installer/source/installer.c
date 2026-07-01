@@ -37,7 +37,7 @@ static void patch_505_v119(uint64_t kernbase) {
 
     *(uint8_t *)(kernbase + 0x30D9AA) = 0xEB;
 
-    memcpy((void *)(kernbase + 0x30DE01), "\xE9\xD0\x00\x00\x00", 5);
+    memcpy((void *)(kernbase + 0x30DE08), "\xE9\xD0\x00\x00\x00", 5);
 
     *(uint16_t *)(kernbase + 0x194875) = 0x9090;
 
@@ -296,6 +296,8 @@ static void patch_903_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x271377), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x271282), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x884BE), "\x90\x90\x90\x90\x90\x90", 6);
 }
 
 static void patch_950_v119(uint64_t kernbase) {
@@ -327,6 +329,8 @@ static void patch_950_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x201F07), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x201E12), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x19E66E), "\x90\x90\x90\x90\x90\x90", 6);
 }
 
 static void patch_1000_v119(uint64_t kernbase) {
@@ -358,6 +362,8 @@ static void patch_1000_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x472F67), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x472E72), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x3999AE), "\x90\x90\x90\x90\x90\x90", 6);
 }
 
 static void patch_1071_v119(uint64_t kernbase) {
@@ -389,6 +395,8 @@ static void patch_1071_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0xD75B7), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0xD74C2), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x482D4E), "\x90\x90\x90\x90\x90\x90", 6);
 }
 
 static void patch_1100_v119(uint64_t kernbase) {
@@ -453,6 +461,8 @@ static void patch_1102_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2DE057), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x2DDF62), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x36436E), "\x90\x90\x90\x90\x90\x90", 6);
 }
 
 static void patch_1150_v119(uint64_t kernbase) {
@@ -484,6 +494,8 @@ static void patch_1150_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD5E7), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x2BD4F2), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x30390E), "\x90\x90\x90\x90\x90\x90", 6);
 }
 
 static void patch_1200_v119(uint64_t kernbase) {
@@ -621,10 +633,11 @@ void patch_kernel() {
         case 950: case 951: case 960:
             patch_950_v119(kernbase);
             break;
-        case 1000: case 1001: case 1050: case 1070:
+        case 1000: case 1001:
             patch_1000_v119(kernbase);
             break;
-        case 1071:
+        // 10.50 / 10.70 / 10.71 share an identical kernel layout (verified: every patch site matches).
+        case 1050: case 1070: case 1071:
             patch_1071_v119(kernbase);
             break;
         case 1100:
