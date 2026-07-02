@@ -13,9 +13,9 @@ citations. Nothing is summarized from external documentation.
 
 | Symbol              | Value                                | Source                     |
 |---------------------|--------------------------------------|----------------------------|
-| `PACKET_VERSION`    | `"1.3"`                              | protocol.h:11              |
-| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.2.3\01.0"`   | protocol.h:12 (+ capability level, see 2.1) |
-| `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:13              |
+| `PACKET_VERSION`    | `"1.3"`                              | protocol.h:12              |
+| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.3.0\01.0"`   | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
+| `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:14              |
 | `BROADCAST_MAGIC`   | `0xFFFFAAAA`                         | server.h:19                |
 
 ### 1.2 Ports
@@ -64,13 +64,13 @@ Framing loop (server.c:102-203):
 `cmd_handler` inlines five infrequent commands, then routes everything else by
 the middle byte of the command ID:
 
-| Namespace      | Match (`(cmd >> 16) & 0xFF`) | Dispatch target                     | File         |
-|----------------|------------------------------|-------------------------------------|--------------|
-| Info/ping      | n/a (inlined)                | `cmd_handler` itself                | server.c:52  |
-| Process        | `0xAA`                       | `proc_handle`                       | proc.c:2268  |
-| Debug          | `0xBB`                       | `debug_handle`                      | kern.c:779   |
-| Kernel R/W     | `0xCC`                       | `kern_handle`                       | console.c:60 |
-| Console        | `0xDD`                       | `console_handle`                    | debug.c:121  |
+| Namespace      | Match (`(cmd >> 16) & 0xFF`) | Dispatch target                     | File          |
+|----------------|------------------------------|-------------------------------------|---------------|
+| Info/ping      | n/a (inlined)                | `cmd_handler` itself                | server.c:56   |
+| Process        | `0xAA`                       | `proc_handle`                       | proc.c:2505   |
+| Debug          | `0xBB`                       | `debug_handle`                      | debug.c:950   |
+| Kernel R/W     | `0xCC`                       | `kern_handle`                       | kern.c:57     |
+| Console        | `0xDD`                       | `console_handle`                    | console.c:205 |
 
 `VALID_CMD(cmd)` additionally requires the top byte to be `0xBD` (protocol.h:88).
 
@@ -149,7 +149,13 @@ stable.
 
 ## 2. Command reference
 
-50 total commands. Every command macro defined in `protocol.h` has a handler.
+68 commands reach a handler in a release build. Not every one has a `CMD_*` macro:
+the newer additions (bulk write `0xBDAACC04`, Turbo Scan `0xBDAACC10-0xBDAACC17`,
+assemble `0xBDAA0024`, FS/GS-base `0xBDBB000E/0xBDBB000F`, foreground-app
+`0xBDDD0006`) are dispatched as **raw hex literals** with no macro, because some
+clients enumerate the published `CMD_*` set and depend on its count (see
+`protocol.h:305-311`). Three dev-only diagnostics (`0xBDAACC30/31/32`) exist in
+development builds but are **stripped from release payloads** and are not listed here.
 
 ### 2.1 Info & ping (`0xBD000xxx`, `0xBDAACC06`)
 
@@ -166,7 +172,7 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 #### `CMD_BRANDING = 0xBD000501`
 - **Request body:** none.
 - **Response:** `uint32_t length`, then `length` bytes: the human branding string
-  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.2.3"`), a single `NUL`, then a
+  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.3.0"`), a single `NUL`, then a
   **capability level** string (`"1.0"`), with no trailing NUL.
 - **Capability level:** C-string clients read up to the first `NUL` and see only
   the unchanged brand; capability-aware clients read past the `NUL` to get the
@@ -428,6 +434,105 @@ Narrows the current scan set by applying a second comparison.
 
 For the enum values used by `valueType` and `compareType`, see §7.
 
+#### Turbo Scan family `0xBDAACC10` - `0xBDAACC17` (scan_turbo.c) - **raw literals**
+
+A high-throughput scan engine ported from ps5debug-NG (opcodes chosen to not
+collide with the published `CMD_*` set, so no macros - see `protocol.h:305-316`).
+It layers three accelerators over the classic scan: a SIMD comparator, a
+page-table **aliasing** read path (maps target physical pages into the server's
+own address space and reads them via a normal VA, far faster than per-chunk
+`sys_proc_rw`), a **server-resident** survivor set (results kept server-side so
+narrowing passes never ship the full address list), and worker-thread
+**parallel** compare. The release payload advertises **both** phases:
+
+- **Phase A** - known-value scan: exact/relative comparisons over a resident,
+  aliased, parallel pipeline (the fast path for "find value X, then narrow").
+- **Phase B** - snapshot / unknown-initial-value: the server snapshots the region
+  into a RAM+disk hybrid value store so later passes can compare against the
+  first or previous snapshot (increased/decreased/changed with no seed value).
+
+All flags are **opt-in per request**; capabilities are negotiated via `CAPS`.
+Every opcode except `CAPS` **requires auth bit 1** (like the rest of the scan
+family). Flag/engine bit tables are in §7.4.
+
+##### `0xBDAACC10` CAPS - `proc_turboscan_caps_handle` (no auth)
+- **Request body:** none.
+- **Response:** `CMD_SUCCESS`, `struct cmd_proc_turboscan_caps_response` (16 bytes):
+  `{u32 version(=1); u32 engines(TSE_* bitmask); u32 max_threads(=4); u32 reserved;}`.
+  A release build reports `engines = 0x3FF` (all engines, Phase A + Phase B).
+  Clients call this first and gate their UI on the bits they see.
+
+##### `0xBDAACC11` START - `proc_turboscan_start_handle` (auth bit 1)
+- **Request body:** `struct cmd_proc_turboscan_start_packet` (mirrors
+  `cmd_proc_scan_start_packet` + a trailing `u32 flags` of `TS_*` bits).
+- **Trailing data:** `lenData` bytes of seed value(s) (as for `SCAN_START`).
+- **Response:** if `TS_SERVER_RESIDENT` was requested, `CMD_SUCCESS` then
+  `struct cmd_proc_turboscan_resident_summary` (`{u32 resident_stored; u64 count;}`)
+  - when `resident_stored==1` the survivors stay server-side (fetch with GET) and
+  no result runs follow. Otherwise the reply is the classic batched
+  `(offset,value)` run stream terminated by the 8-byte `0xFFFF...` sentinel, wire-
+  identical to the async `SCAN_START` so existing parsers work unchanged.
+
+##### `0xBDAACC12` COUNT (rescan) - `proc_turboscan_count_handle` (auth bit 1)
+- **Request body:** `struct cmd_proc_turboscan_count_packet` (mirrors
+  `cmd_proc_scan_count_packet` + a trailing `u32 flags`). Narrows the current
+  resident set with a second comparison.
+- **Response:** same shape as START (resident summary, or streamed runs).
+
+##### `0xBDAACC13` GET - `proc_turboscan_get_handle` (auth bit 1)
+- **Request body:** `struct cmd_proc_turboscan_get_packet` (12 bytes,
+  `{u32 start_index; u32 count; u32 flags;}`) - fetch resident survivors
+  `[start_index, start_index+count)`.
+- **Response:** `CMD_SUCCESS`, `u32 hdr`, then `(hdr & 0x7FFFFFFF)` records, then a
+  trailing `CMD_SUCCESS`. `hdr` low 31 bits = records returned; bit 31 set => each
+  record carries a first-scan value (Phase B 3-value shape). A record is
+  `{u64 addr; value current; value previous}` (`8 + 2*value_length` bytes);
+  `previous == current` for sessions not keeping a previous snapshot.
+
+##### `0xBDAACC14` END - `proc_turboscan_end_handle` (auth bit 1)
+- **Request body:** none.
+- **Response:** `CMD_SUCCESS`. Frees this connection's resident survivor set +
+  aliasing arena. (Also freed automatically on disconnect.)
+
+##### `0xBDAACC15` CONFIG - `proc_turboscan_config_handle` (auth bit 1)
+- **Request body:** `struct cmd_proc_turboscan_config_packet` (8 bytes,
+  `{u32 ram_thresh_mb; u32 spill_path_len;}`) then `spill_path_len` path bytes.
+  Sets the Phase B snapshot value-store RAM threshold and disk spill directory.
+- **Response:** `CMD_SUCCESS`.
+
+##### `0xBDAACC16` REGIONS (classify) - `proc_turboscan_regions_handle` (auth bit 1)
+- **Request body:** `struct cmd_proc_turboscan_regions_packet` (16 bytes,
+  `{u32 pid; u32 max; u32 probe_bytes; u32 reserved;}`).
+- **Response:** `CMD_SUCCESS`, `u32 num`, then `num × struct cmd_proc_turboscan_region_info`
+  (32 bytes each: `{u64 start; u64 end; u32 prot; u32 flags; u32 mbps; u32 reserved;}`).
+  `flags` bit 0 = leaf PTE `PCD=1` (uncached / slow); `mbps` is a measured probe
+  throughput. Informational only - the server does **not** drop any region; this
+  lets a client let the user exclude slow/uncached regions from a scan.
+
+##### `0xBDAACC17` CANCEL - `proc_turboscan_cancel_handle` (auth bit 1)
+Abort an in-flight turbo scan (`START` or `COUNT`) running for a given pid. Because the
+command dispatcher is serial per connection, the connection that issued the long scan is
+busy streaming and cannot receive a command - so **CANCEL must be sent on a second,
+separately authed connection**. It arms a pid-scoped flag that the scan loops poll (all
+parallel workers observe it), so they stop early and emit their normal terminator; the
+waiting client on the first connection then unblocks.
+- **Request body:** `u32 pid` (the pid whose in-flight scan to cancel; must be non-zero).
+- **Response:** `CMD_SUCCESS` (the flag is armed - it does not wait for the scan to notice).
+  `CMD_DATA_NULL` if not authed / no body / `pid == 0`.
+- **Effect on the cancelled scan:**
+  - **Snapshot `START` (unknown-initial-value):** stops cleanly, frees the half-built
+    snapshot, and returns the snapshot summary with `snapshot_ok = 0`. Safe to detect.
+  - **`START` (known-value) and `COUNT` (rescan):** stop early and return their normal
+    terminator with **partial** results; the resident/snapshot session is left
+    **indeterminate**. After a cancel, treat the session as invalid - issue `END`
+    (`0xBDAACC14`) to discard it, or a fresh `START`, before trusting any results.
+- **Timing / staleness:** a cancel arriving before the scan starts is discarded (`START`/
+  `COUNT` clear a stale same-pid flag on entry), so you can only cancel a scan that is
+  actually running. A cancel for a pid with no running scan is a harmless no-op until the
+  next scan on that pid begins (which clears it). The client-driven streaming `COUNT`
+  (where the client feeds chunks) is already stoppable by sending its end sentinel and is
+  unaffected by this flag.
+
 ---
 
 ### 2.3 Debug commands (`0xBDBBxxxx`) - dispatched by `debug_handle` (kern.c:779-803)
@@ -503,6 +608,23 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 - **Request body:** `struct cmd_debug_setregs_packet` (8 bytes).
 - **Trailing data:** `length` bytes (`sizeof(struct __dbreg64)`).
 - **Response:** `CMD_SUCCESS`.
+
+#### `0xBDBB000E` GET FS/GS-base - `debug_getfsgsbase_handle` (debug.c:906) - **raw literal**
+Reads the per-thread `FSBASE`/`GSBASE` MSR shadow values for a thread of the
+attached process. Dispatched as a raw literal (no `CMD_*` macro), same rationale
+as the other new opcodes. Requires an active debug session.
+- **Request body:** `uint32_t lwpid`.
+- **Response:** `CMD_SUCCESS`, then **16 bytes**: `{u64 fsbase; u64 gsbase;}`. Returns
+  `CMD_ERROR` if not attached or the kernel read fails.
+
+#### `0xBDBB000F` SET FS/GS-base - `debug_setfsgsbase_handle` (debug.c:925) - **raw literal**
+Writes `FSBASE`/`GSBASE` for a thread of the attached process. Two-status data-phase
+pattern (like `CMD_DEBUG_SETREGS`).
+- **Request body:** `{u32 lwpid; u32 length;}` - `length` must equal `16`.
+- **Trailing data:** after the server's first `CMD_SUCCESS`, the client sends 16
+  bytes `{u64 fsbase; u64 gsbase;}`.
+- **Response:** `CMD_SUCCESS` (ack), then after the write a second `CMD_SUCCESS`
+  (or `CMD_ERROR` on bad length / kernel failure). Clients consume **two** `u32`s.
 
 #### `CMD_DEBUG_CONTINUE = 0xBDBB0010` (kern.c:719-729)
 - **Request body:** `struct cmd_debug_stopgo_packet` (4 bytes, `stop`).
@@ -684,6 +806,14 @@ clients cannot invoke it directly.
 | `0xBDAACC02` | `CMD_PROC_SCAN_COUNT`            | `proc_scan_count_handle`        | bit 1 |
 | `0xBDAACC03` | `CMD_PROC_SCAN_GET`              | `proc_scan_get_handle`          | bit 1 |
 | `0xBDAACC06` | `CMD_PROC_NOP`                   | inline (server.c:68)            |       |
+| `0xBDAACC10` | _(raw literal)_ Turbo CAPS       | `proc_turboscan_caps_handle`    |       |
+| `0xBDAACC11` | _(raw literal)_ Turbo START      | `proc_turboscan_start_handle`   | bit 1 |
+| `0xBDAACC12` | _(raw literal)_ Turbo COUNT      | `proc_turboscan_count_handle`   | bit 1 |
+| `0xBDAACC13` | _(raw literal)_ Turbo GET        | `proc_turboscan_get_handle`     | bit 1 |
+| `0xBDAACC14` | _(raw literal)_ Turbo END        | `proc_turboscan_end_handle`     | bit 1 |
+| `0xBDAACC15` | _(raw literal)_ Turbo CONFIG     | `proc_turboscan_config_handle`  | bit 1 |
+| `0xBDAACC16` | _(raw literal)_ Turbo REGIONS    | `proc_turboscan_regions_handle` | bit 1 |
+| `0xBDAACC17` | _(raw literal)_ Turbo CANCEL     | `proc_turboscan_cancel_handle`  | bit 1 |
 | `0xBDBB0001` | `CMD_DEBUG_ATTACH`               | `debug_attach_handle_svc`       |       |
 | `0xBDBB0002` | `CMD_DEBUG_DETACH`               | `debug_detach_handle`           |       |
 | `0xBDBB0003` | `CMD_DEBUG_SET_BREAKPOINT`       | `debug_set_breakpoint_handle`   |       |
@@ -697,6 +827,8 @@ clients cannot invoke it directly.
 | `0xBDBB000B` | `CMD_DEBUG_SETFPREGS`            | `debug_setfpregs_handle`        |       |
 | `0xBDBB000C` | `CMD_DEBUG_GETDBREGS`            | `debug_getdbregs_handle`        |       |
 | `0xBDBB000D` | `CMD_DEBUG_SETDBREGS`            | `debug_setdbregs_handle`        |       |
+| `0xBDBB000E` | _(raw literal)_ GET FS/GS-base   | `debug_getfsgsbase_handle`      |       |
+| `0xBDBB000F` | _(raw literal)_ SET FS/GS-base   | `debug_setfsgsbase_handle`      |       |
 | `0xBDBB0010` | `CMD_DEBUG_CONTINUE`             | `debug_continue_handle`         |       |
 | `0xBDBB0011` | `CMD_DEBUG_THREAD_INFO`          | `debug_thread_info_handle`      |       |
 | `0xBDBB0012` | `CMD_DEBUG_STEP`                 | `debug_step_handle`             |       |
@@ -744,6 +876,14 @@ All structs are `__attribute__((packed))`. Sizes match the `CMD_*_PACKET_SIZE` m
 | `cmd_proc_xrefs_to_packet`              | 24   | `u32 pid; u64 scan_address; u32 scan_length; u64 target_address;`         |
 | `cmd_proc_read_stack_packet`            | 24   | `u32 pid; u64 rbp; u64 rsp; u32 depth;`                                   |
 | `cmd_proc_assemble_packet`              | 12   | `u64 base_addr; u32 ks_opt_syntax;` (followed by asm text on the wire)    |
+| `cmd_proc_turboscan_start_packet`       | 27   | `u32 pid; u64 address; u32 length; u8 valueType, compareType, alignment; u32 lenData; u32 flags;` |
+| `cmd_proc_turboscan_count_packet`       | 22   | `u32 pid; u64 base_address; u8 valueType, compareType; u32 lenData; u32 flags;` |
+| `cmd_proc_turboscan_get_packet`         | 12   | `u32 start_index; u32 count; u32 flags;`                                  |
+| `cmd_proc_turboscan_config_packet`      | 8    | `u32 ram_thresh_mb; u32 spill_path_len;` (followed by spill path bytes)   |
+| `cmd_proc_turboscan_regions_packet`     | 16   | `u32 pid; u32 max; u32 probe_bytes; u32 reserved;`                        |
+| Turbo CANCEL request                    | 4    | `u32 pid;` (raw, no named struct; sent on a 2nd connection)               |
+| GET FS/GS-base request                  | 4    | `u32 lwpid;` (raw, no named struct)                                       |
+| SET FS/GS-base request                  | 8    | `u32 lwpid; u32 length(=16);` (16-byte `{u64 fsbase; u64 gsbase}` data phase) |
 | `cmd_debug_attach_packet`               | 8    | `u32 pid; u32 client_ip;`                                                 |
 | `cmd_debug_breakpt_packet`              | 16   | `u32 index, enabled; u64 address;`                                        |
 | `cmd_debug_watchpt_packet`              | 24   | `u32 index, enabled, length, breaktype; u64 address;`                     |
@@ -770,6 +910,10 @@ All structs are `__attribute__((packed))`. Sizes match the `CMD_*_PACKET_SIZE` m
 | `cmd_proc_assemble_err`                 | 8    | `u32 ks_errno; u32 msg_len;` (followed by `msg_len` chars of `ks_strerror`) |
 | `cmd_console_foreground_app_response`   | 132  | `u32 pid; char titleid[16], contentid[64], name[40], app_ver[8];`         |
 | `cmd_debug_thrinfo_response`            | 40   | `u32 lwpid, priority; char name[32];`                                     |
+| `cmd_proc_turboscan_caps_response`      | 16   | `u32 version; u32 engines; u32 max_threads; u32 reserved;`                |
+| `cmd_proc_turboscan_resident_summary`   | 12   | `u32 resident_stored; u64 count;`                                         |
+| `cmd_proc_turboscan_region_info` (streamed) | 32 | `u64 start; u64 end; u32 prot; u32 flags; u32 mbps; u32 reserved;`       |
+| GET FS/GS-base response                 | 16   | `u64 fsbase; u64 gsbase;` (after `CMD_SUCCESS`)                           |
 | `disasm_instr_entry` (streamed)         | 32   | see §2.2                                                                  |
 
 ---
@@ -830,6 +974,37 @@ All structs are `__attribute__((packed))`. Sizes match the `CMD_*_PACKET_SIZE` m
 | 2     | 8     |
 | 3     | 4     |
 
+### 7.4 Turbo Scan engine bits + request flags (protocol.h:318-339)
+
+`TSE_*` - reported by `CAPS` in `engines` (which accelerators/phases the server supports):
+
+| Bit          | Name                    | Meaning                                        |
+|--------------|-------------------------|------------------------------------------------|
+| `0x00000001` | `TSE_SIMD_COMPARE`      | SIMD comparator                                |
+| `0x00000002` | `TSE_ALIASING`          | page-table aliasing read path                  |
+| `0x00000004` | `TSE_SERVER_RESIDENT`   | server-resident survivor set                   |
+| `0x00000008` | `TSE_SNAPSHOT`          | Phase B snapshot store                          |
+| `0x00000010` | `TSE_SNAPSHOT_SEGMENTS` | Phase B multi-segment snapshot                 |
+| `0x00000020` | `TSE_SNAPSHOT_CONFIG`   | Phase B `CONFIG` (RAM threshold + spill dir)   |
+| `0x00000040` | `TSE_SNAPSHOT_FIRST`    | compare vs first snapshot                      |
+| `0x00000080` | `TSE_SNAPSHOT_PREVIOUS` | compare vs previous snapshot                   |
+| `0x00000100` | `TSE_PARALLEL_COMPARE`  | worker-thread parallel compare                 |
+| `0x00000200` | `TSE_RESCAN_ALIASING`   | aliasing on rescan (`COUNT`) too               |
+
+`TS_*` - per-request opt-in flags in `START` / `COUNT` `flags`:
+
+| Bit          | Name                        | Meaning                                     |
+|--------------|-----------------------------|---------------------------------------------|
+| `0x00000001` | `TS_USE_ALIASING`           | use the aliasing read path this scan        |
+| `0x00000002` | `TS_SERVER_RESIDENT`        | keep survivors server-side (fetch via `GET`)|
+| `0x00000004` | `TS_SNAPSHOT`               | take a Phase B snapshot                      |
+| `0x00000008` | `TS_SNAPSHOT_INCLUDE_ZEROS` | include zero-valued slots in the snapshot   |
+| `0x00000010` | `TS_SNAPSHOT_SEGMENTS`      | segmented snapshot                           |
+| `0x00000020` | `TS_SNAPSHOT_KEEP_FIRST`    | retain first snapshot for later compares    |
+| `0x00000040` | `TS_SNAPSHOT_KEEP_PREVIOUS` | retain previous snapshot for later compares |
+| `0x00000080` | `TS_PARALLEL_COMPARE`       | request parallel compare                     |
+| `0x00000100` | `TS_RESCAN_ALIASING`        | use aliasing on the `COUNT` rescan           |
+
 ---
 
 ## 8. Response framing patterns
@@ -871,5 +1046,11 @@ Documented here so a developer doesn't mistake them for bugs:
 
 ---
 
-*This document was generated from the source tree at 2026-04-24 and reflects
-the PS4Debug-NG `v1.2.1` payload (`PACKET_BRANDING` in protocol.h:12).*
+*This document reflects the ps4debug-NG `v1.3.0` payload (`PS4DEBUG_NG_VERSION_STR`
+in `version.h`, surfaced via `PACKET_BRANDING` at protocol.h:13). Last reconciled
+against the source tree on 2026-07-01, when the Turbo Scan family
+(`0xBDAACC10-0xBDAACC17`, incl. the CANCEL command) and FS/GS-base
+(`0xBDBB000E/0xBDBB000F`) were added (the v1.3.0 bump).
+Wire layouts (struct sizes/fields, opcodes, status codes, enums) are authoritative;
+per-command `file:line` citations are best-effort and can lag source edits - treat
+them as starting points, not exact anchors.*

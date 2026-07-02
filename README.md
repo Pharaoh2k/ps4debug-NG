@@ -18,7 +18,7 @@ Note: A mirror of this repo is available on: https://git.slowb.ro/OpenSourcereR/
 
 ## Supported firmwares
 
-33 firmware versions across the 5.05–13.00 range. Each has a dedicated kernel
+36 firmware versions across the 5.05-13.50 range. Each has a dedicated kernel
 patch routine in [installer/source/installer.c](installer/source/installer.c);
 booting on an unsupported FW prints `unsupported firmware <N> - kernel not
 patched` to the kernel log and aborts cleanly.
@@ -33,20 +33,19 @@ patched` to the kernel log and aborts cleanly.
 | 10.xx | 10.00, 10.01, 10.50, 10.70, 10.71           |
 | 11.xx | 11.00, 11.02, 11.50, 11.52                  |
 | 12.xx | 12.00, 12.02, 12.50, 12.52                  |
-| 13.xx | 13.00 *(partial — see note below)*          |
+| 13.xx | 13.00, 13.02, 13.04, 13.50                  |
 
 Clients can read the running FW with `CMD_FW_VERSION` (returns a `uint16_t` in
 `major*100 + minor` form - e.g. `0x1F4 = 500 = 5.00`).
 
-**13.00 limitation:** memory R/W, scanning, debugging (attach/breakpoints/regs/
-step/continue), maps, alloc/free, console commands, and kernel R/W all work as
-on any other supported firmware. **Commands that spawn a worker thread in the
-target process** — `CMD_PROC_INSTALL`, `CMD_PROC_CALL`, `CMD_PROC_ELF`,
-`CMD_PROC_ELF_RPC` — currently return `CMD_ERROR` on 13.00 because the
-libkernel.sprx symbol offsets (`scePthreadAttrInit`, `scePthreadAttrSetstacksize`,
-`scePthreadCreate`, `_thr_initial`) haven't been sourced for that firmware. Add
-them to the `proc_create_thread` switch in [kdebugger/source/proc.c](kdebugger/source/proc.c)
-to enable ELF injection / RPC on 13.00.
+**13.x support:** 13.00 / 13.02 / 13.04 / 13.50 run the full command set, including
+the commands that spawn a worker thread in the target process (`CMD_PROC_INTALL`,
+`CMD_PROC_CALL`, `CMD_PROC_ELF`, `CMD_PROC_ELF_RPC`) - the libkernel.sprx symbol
+offsets (`scePthreadAttrInit`, `scePthreadAttrSetstacksize`, `scePthreadCreate`,
+`_thr_initial`) are now sourced for the 13.x series in the `proc_create_thread`
+switch in [kdebugger/source/proc.c](kdebugger/source/proc.c). (13.x firmware
+offsets/patches were validated against decrypted kernels; on-hardware validation
+to date has been on earlier firmware.)
 
 ---
 
@@ -55,6 +54,10 @@ to enable ELF injection / RPC on 13.00.
 ### Process inspection and manipulation
 - **Enumerate processes** (`p_comm` + pid list).
 - **Read and write target memory** in 64 KiB streamed chunks.
+- **Bulk write / freeze** (`0xBDAACC04`) - apply many `{address, length, bytes}`
+  writes in one exchange (the write counterpart to bulk-read), collapsing a
+  freeze / multi-poke loop into a single round-trip with an optional per-entry
+  status array. Raw-literal opcode.
 - **List virtual memory maps (including missing sections improvements)** - ranges, protections, backing names.
 - **Query process metadata** - name, path, titleId, contentId.
 - **Identify the foreground app** (`0xBDDD0006`) - returns pid + titleid + contentid
@@ -82,11 +85,14 @@ to enable ELF injection / RPC on 13.00.
 - **Attach** to a single target with `CMD_DEBUG_ATTACH` (sets up an async
   interrupt channel back to the client).
 - **Software breakpoints** - up to **30** slots, transparent `0xCC` injection.
-- **Hardware watchpoints** - up to **4** DR0–DR3 slots with read / write /
+- **Hardware watchpoints** - up to **4** DR0-DR3 slots with read / write /
   read-write and 1/2/4/8-byte granularity.
 - **Thread control** - list, suspend, resume, single-step, and per-thread step.
 - **Full register access** - general-purpose (`__reg64`), FPU + YMM
   (`savefpu_ymm`, 512 B), and debug registers (`__dbreg64`, 16 × u64).
+- **Per-thread FS/GS base** (`0xBDBB000E` get / `0xBDBB000F` set) - read/write the
+  `FSBASE`/`GSBASE` thread pointers of an attached process, needed to resolve
+  thread-local storage. Raw-literal opcodes.
 - **Continue / stop / halt** the whole process from one command.
 - **Asynchronous interrupt packets** (1184 bytes each) delivered on a separate
   TCP connection so the client never polls.
@@ -129,9 +135,19 @@ client-side `keystone.dll` when applying `VarType.ASM` patches.
   clients narrow a result set server-side over many passes.
 - **AOB scan** (`CMD_PROC_SCAN_AOB`) - byte patterns with `??` wildcards.
 - **Multi-pattern AOB scan** (`CMD_PROC_SCAN_AOB_MULTI`) - many patterns in
-  one pass.
-- **Auth-gated** - scan commands require a prior `CMD_PROC_AUTH` handshake.
-- **On-Console Scan**
+  one pass, scanned by region-parallel worker threads.
+- **Turbo Scan** (`0xBDAACC10` - `0xBDAACC17`) - a high-throughput scan engine
+  with a SIMD comparator, a page-table **aliasing** read path (reads target
+  physical pages via the server's own VA instead of per-chunk copies),
+  **server-resident** survivor sets (narrowing passes never ship the full
+  address list), and worker-thread **parallel** compare. Covers both known-value
+  scanning (Phase A) and snapshot / unknown-initial-value scanning (Phase B).
+  Capabilities are negotiated via a `CAPS` query; all flags are opt-in per
+  request. A long scan can be **cancelled mid-flight** (`0xBDAACC17`, sent from a
+  second connection) - handy for aborting a snapshot / unknown-value scan over a
+  huge region. Raw-literal opcodes; see [PROTOCOL.md](PROTOCOL.md) §2.2 / §7.4.
+- **Auth-gated** - all scan commands (classic, AOB, and Turbo except its `CAPS`
+  probe) require a prior `CMD_PROC_AUTH` handshake.
 
 ### System UI integration
 - **Push notifications** to the user's screen
@@ -194,10 +210,10 @@ Three components, one deliverable:
 
 | File               | Size (approx.) | Role                                                           |
 |--------------------|----------------|----------------------------------------------------------------|
-| `debugger.bin`     | ~380 KB        | Userland command server. Runs as a pid, listens on 744/755.    |
-| `kdebugger.elf`    | ~28 KB         | Kernel module. Provides the `sys_proc_*` / `sys_kern_*` ops.   |
-| `installer.bin`    | ~430 KB        | Loader that installs the kernel module and starts the server.  |
-| **`ps4debug-ng.bin`** | **~430 KB** | **The single file you send to the PS4 payload loader.**       |
+| `debugger.bin`     | ~3.0 MB        | Userland command server. Runs as a pid, listens on 744/755. Includes the embedded Keystone assembler + Zydis. |
+| `kdebugger.elf`    | ~30 KB         | Kernel module. Provides the `sys_proc_*` / `sys_kern_*` ops.   |
+| `installer.bin`    | ~3.1 MB        | Loader that installs the kernel module and starts the server.  |
+| **`ps4debug-ng.bin`** | **~3.1 MB** | **The single file you send to the PS4 payload loader.**       |
 
 ---
 
@@ -222,22 +238,23 @@ struct cmd_packet {
 Followed by the command's fixed request struct (if any), any trailing
 variable-length payload, and a `uint32_t` status code reply.
 
-**Full protocol specification:** [debugger/PROTOCOL.md](debugger/PROTOCOL.md) -
-50 commands, every packet struct, every enum, every status code, sourced
-with `file:line` citations.
+**Full protocol specification:** [PROTOCOL.md](PROTOCOL.md) - 68 commands, every
+packet struct, every enum, every status code, and the kernel-side syscall
+interface. (The old `debugger/PROTOCOL.md` now just points here, so the spec
+lives in one place.)
 
 ---
 
 ## Command coverage
 
-| Namespace     | Count | Examples                                                   |
-|---------------|-------|------------------------------------------------------------|
-| Info / ping   | 5     | `VERSION`, `FW_VERSION`, `BRANDING`, `PROTOCOL_ID`, `NOP`  |
-| Process       | 22    | `READ`, `WRITE`, `MAPS`, `CALL`, `SCAN_*`, `DISASM_*`      |
-| Debug         | 18    | `ATTACH`, `SET_BREAKPOINT`, `GETREGS`, `STEP`, `CONTINUE`  |
-| Kernel R/W    | 3     | `KERN_BASE`, `KERN_READ`, `KERN_WRITE`                     |
-| Console       | 5     | `NOTIFY`, `PRINT`, `REBOOT`, `INFO`, `END`                 |
-| **Total**     | **53**| All 50 `CMD_*` defines plus 3 inline top-level commands    |
+| Namespace     | Count | Examples                                                       |
+|---------------|-------|----------------------------------------------------------------|
+| Info / ping   | 5     | `VERSION`, `FW_VERSION`, `BRANDING`, `PLATFORM_ID`, `NOP`      |
+| Process       | 34    | `READ`, `WRITE`, bulk-write, `MAPS`, `CALL`, `SCAN_*`, Turbo `*` (incl. CANCEL), `DISASM_*`, assemble |
+| Debug         | 20    | `ATTACH`, `SET_BREAKPOINT`, `GETREGS`, FS/GS-base, `STEP`, `CONTINUE` |
+| Kernel R/W    | 3     | `KERN_BASE`, `KERN_READ`, `KERN_WRITE`                         |
+| Console       | 6     | `NOTIFY`, `PRINT`, `REBOOT`, `INFO`, `END`, foreground-app     |
+| **Total**     | **68**| The newest commands are dispatched as raw hex literals with no `CMD_*` macro (some clients enumerate the macro set). Excludes 3 dev-only diagnostics stripped from release builds. |
 
 ---
 
@@ -261,12 +278,13 @@ kernel module, and begins listening on port 744.
 You should see a system notification confirming the payload is alive:
 
 ```
-ps4debug-NG by OSR v1.2.1
-Based on golden source
-Inspired by
-Ctn, SiSTRo & DeathRGH
-            ♥♥♥♥
+ps4debug-NG by OSR v1.3.0
+Special thanks to golden,
+Ctn, SiSTRo, DeathRGH
+& Pharaoh2k! ♥
 ```
+
+(The version line is built from `version.h`, so it tracks the current build automatically.)
 
 ---
 
@@ -288,7 +306,7 @@ s.sendall(struct.pack("<III", PACKET_MAGIC, CMD_VERSION, 0))
 print("server version:", s.recv(length).decode())
 ```
 
-See [debugger/PROTOCOL.md](debugger/PROTOCOL.md) for the exact byte layout of
+See [PROTOCOL.md](PROTOCOL.md) for the exact byte layout of
 every command, response, and async interrupt packet.
 
 ---

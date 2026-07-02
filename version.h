@@ -3,6 +3,6 @@
 #ifndef _PS4DEBUG_NG_VERSION_H
 #define _PS4DEBUG_NG_VERSION_H
 
-#define PS4DEBUG_NG_VERSION_STR "1.2.3"
+#define PS4DEBUG_NG_VERSION_STR "1.3.0"
 
 #endif

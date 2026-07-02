@@ -60,7 +60,7 @@ int _main(void) {
 
         if (strlen(ip_buf) > 4) {
 
-            sceSysUtilSendSystemNotificationWithText(222, PACKET_BRANDING "\nBased on source by golden\n\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0Inspired by\nCtn, SiSTRo & DeathRGH\n\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xC2\xA0\xE2\x9D\xA4\xE2\x9D\xA4\xE2\x9D\xA4\xE2\x9D\xA4");
+            sceSysUtilSendSystemNotificationWithText(222, PACKET_BRANDING "\nSpecial thanks to golden,\nCtn, SiSTRo, DeathRGH\n& Pharaoh2k! \xE2\x9D\xA4");
             retry = 0;
             start_server();
             continue;
