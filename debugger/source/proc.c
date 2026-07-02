@@ -2491,6 +2491,7 @@ int proc_handle(int fd, struct cmd_packet *packet, unsigned char client_idx) {
         case 0xBDAACC14u:             return proc_turboscan_end_handle(fd, packet, client_idx);
         case 0xBDAACC15u:             return proc_turboscan_config_handle(fd, packet);
         case 0xBDAACC16u:             return proc_turboscan_regions_handle(fd, packet);
+        case 0xBDAACC17u:             return proc_turboscan_cancel_handle(fd, packet);
         case 0xBDAACC30u:             return proc_ptwalk_test_handle(fd, packet);
         case 0xBDAACC31u:             return proc_alias_test_handle(fd, packet);
         case 0xBDAACC32u:             return proc_turboscan_fileprobe_handle(fd, packet);

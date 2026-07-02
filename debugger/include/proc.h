@@ -52,6 +52,7 @@ int proc_turboscan_get_handle(int fd, struct cmd_packet *packet, unsigned char c
 int proc_turboscan_end_handle(int fd, struct cmd_packet *packet, unsigned char client_idx);
 int proc_turboscan_config_handle(int fd, struct cmd_packet *packet);
 int proc_turboscan_regions_handle(int fd, struct cmd_packet *packet);
+int proc_turboscan_cancel_handle(int fd, struct cmd_packet *packet);
 
 int proc_turboscan_fileprobe_handle(int fd, struct cmd_packet *packet);
 

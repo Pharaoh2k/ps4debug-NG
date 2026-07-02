@@ -185,6 +185,13 @@ char     g_turboscan_spill_dir[64]    = "";
 int      g_turboscan_snap_force_fail  = 0;
 uint64_t g_turboscan_materialize_max  = TS_MATERIALIZE_COUNT_MAX;
 
+volatile int g_turboscan_cancel_pid = 0;
+
+static inline int turbo_cancel_pending(uint32_t pid) {
+    int c = g_turboscan_cancel_pid;
+    return c != 0 && c == (int)pid;
+}
+
 static int fs_pread_all(int fd, void *buf, uint64_t len, uint64_t foff) {
     uint8_t *p = (uint8_t *)buf; uint64_t off = 0;
     while (off < len) {
@@ -418,6 +425,7 @@ static int fs_snapshot_create(int fd, unsigned char idx,
         for (uint32_t g = 0; ok && !fail && g < in_nseg; g++) {
             uint64_t seg_base = seg[g].addr, seg_ns = seg[g].nslots, s0 = 0;
             while (ok && !fail && s0 < seg_ns) {
+                if (turbo_cancel_pending(sp->pid)) { fail = 1; break; }
                 uint64_t win_slots = chunk_size / step;
                 if (win_slots == 0) win_slots = 1;
                 if (s0 + win_slots > seg_ns) win_slots = seg_ns - s0;
@@ -533,6 +541,7 @@ static uint64_t fs_snapshot_rescan(int fd, struct turboscan_session *s,
     uint64_t next_prog = prog_step;
 
     for (uint64_t i = fs_next_set(s->bitmap, 0, n); i < n; ) {
+        if (turbo_cancel_pending(s->pid)) break;
         if (i >= next_prog) { net_send_all(fd, &i, 8); next_prog = i + prog_step; }
         uint64_t window_start = fs_slot_addr(s, i);
         uint64_t covered_end  = window_start + value_length;
@@ -694,6 +703,7 @@ static int turboscan_scan_pass_range(int fd,
     uint64_t flush_thresh = 0x3FFE8ULL - value_length;
 
     while (remaining > 0) {
+        if (turbo_cancel_pending(sp->pid)) break;
         uint64_t to_read = (remaining > chunk_size) ? chunk_size : remaining;
 
         const uint8_t *src;
@@ -942,6 +952,18 @@ int proc_turboscan_config_handle(int fd, struct cmd_packet *packet) {
     return 0;
 }
 
+int proc_turboscan_cancel_handle(int fd, struct cmd_packet *packet) {
+    if (!(g_proc_auth_state & 2)) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
+    struct ts_cancel_req { uint32_t pid; } __attribute__((packed));
+    struct ts_cancel_req *r = (struct ts_cancel_req *)packet->data;
+    if (!r || packet->datalen < sizeof(*r) || r->pid == 0) {
+        net_send_int32(fd, CMD_DATA_NULL); return 1;
+    }
+    g_turboscan_cancel_pid = (int)r->pid;
+    net_send_int32(fd, CMD_SUCCESS);
+    return 0;
+}
+
 int proc_turboscan_caps_handle(int fd, struct cmd_packet *packet) {
     (void)packet;
     struct cmd_proc_turboscan_caps_response resp;
@@ -1032,6 +1054,7 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
     struct cmd_proc_turboscan_start_packet *sp =
         (struct cmd_proc_turboscan_start_packet *)packet->data;
     if (!sp) { net_send_int32(fd, CMD_DATA_NULL); return 1; }
+    if (g_turboscan_cancel_pid == (int)sp->pid) g_turboscan_cancel_pid = 0;
     int want_snapshot = (sp->flags & TS_SNAPSHOT) != 0;
     if (sp->compareType > 12 || (sp->lenData == 0 && !want_snapshot)) {
         net_send_int32(fd, CMD_DATA_NULL); return 1;
@@ -1285,6 +1308,7 @@ int proc_turboscan_count_handle(int fd, struct cmd_packet *packet, unsigned char
         net_send_int32(fd, CMD_DATA_NULL);
         return 1;
     }
+    if (g_turboscan_cancel_pid == (int)cp->pid) g_turboscan_cancel_pid = 0;
     int resident = (cp->flags & TS_SERVER_RESIDENT) != 0;
 
     int needs_value_flag    = g_cmptype_needs_value   [cp->compareType] != 0;
@@ -1393,6 +1417,7 @@ int proc_turboscan_count_handle(int fd, struct cmd_packet *packet, unsigned char
             int            win_aliased = 0;
 
             for (uint64_t i = 0; i < n; i++) {
+                if (turbo_cancel_pending(s->pid)) break;
                 uint8_t *rec = recs + i * rec_size;
                 uint64_t addr;
                 memcpy(&addr, rec, 8);
