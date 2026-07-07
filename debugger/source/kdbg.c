@@ -13,7 +13,7 @@ void prefault(void *address, size_t size) {
 
 void *net_alloc_buffer(size_t size) {
     void *p = malloc(size);
-    prefault(p, size);
+    if (p) prefault(p, size);
     return p;
 }
 

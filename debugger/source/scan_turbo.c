@@ -1097,14 +1097,15 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
     uint64_t  simd_max = 0;
     if (simd_ok) {
         simd_max = chunk_size / value_length;
-        simd_off = (uint32_t *)net_alloc_buffer((uint32_t)(simd_max * 4));
+
+        simd_off = (uint32_t *)fs_mmap_anon(simd_max * 4);
         if (!simd_off) simd_ok = 0;
     }
 
     if (!read_buf || !result_buf) {
         if (read_buf) free(read_buf);
         if (result_buf) free(result_buf);
-        if (simd_off) free(simd_off);
+        if (simd_off) fs_munmap(simd_off, simd_max * 4);
         if (pattern) free(pattern);
         if (mask) free(mask);
         net_send_int32(fd, CMD_DATA_NULL);
@@ -1173,7 +1174,7 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
         }
         if (segs && segs != &one) free(segs);
         free(read_buf); free(result_buf);
-        if (simd_off) free(simd_off);
+        if (simd_off) fs_munmap(simd_off, simd_max * 4);
         if (pattern) free(pattern);
         if (mask) free(mask);
         net_send_int32(fd, CMD_SUCCESS);
@@ -1242,7 +1243,7 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
             net_send_all(fd, &sum, sizeof(sum));
             if (segs) free(segs);
             free(read_buf); free(result_buf);
-            if (simd_off) free(simd_off);
+            if (simd_off) fs_munmap(simd_off, simd_max * 4);
             if (pattern) free(pattern);
             if (mask) free(mask);
             scan_alias_release(actx);
@@ -1261,7 +1262,7 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
             net_send_all(fd, &sentinel, 8);
             if (segs) free(segs);
             free(read_buf); free(result_buf);
-            if (simd_off) free(simd_off);
+            if (simd_off) fs_munmap(simd_off, simd_max * 4);
             if (pattern) free(pattern);
             if (mask) free(mask);
             scan_alias_release(actx);
@@ -1284,7 +1285,7 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
 
     free(read_buf);
     free(result_buf);
-    if (simd_off) free(simd_off);
+    if (simd_off) fs_munmap(simd_off, simd_max * 4);
     if (pattern) free(pattern);
     if (mask) free(mask);
     scan_alias_release(actx);
