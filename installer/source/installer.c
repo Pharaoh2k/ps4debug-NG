@@ -48,6 +48,10 @@ static void patch_505_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x1EA767), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x1EA682), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x3AB306), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x45E4F5), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_671_v119(uint64_t kernbase) {
@@ -79,6 +83,10 @@ static void patch_671_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x3C1702), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x459763), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x3EFBD8), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x37675), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_700_v119(uint64_t kernbase) {
@@ -108,6 +116,10 @@ static void patch_700_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2F192), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x26C5F3), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x1AC435), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0xAD624), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_750_v119(uint64_t kernbase) {
@@ -139,6 +151,10 @@ static void patch_750_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x28FA47), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x28F952), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x38AFE5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x27A1BA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_751_v119(uint64_t kernbase) {
@@ -170,6 +186,10 @@ static void patch_751_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x28FA47), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x28F952), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x38AFE5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x27A1BA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_800_v119(uint64_t kernbase) {
@@ -201,6 +221,10 @@ static void patch_800_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x25E407), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x25E312), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x3FDE15), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2F631A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_850_v119(uint64_t kernbase) {
@@ -232,6 +256,10 @@ static void patch_850_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x3A4337), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x3A4242), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x2AC925), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x241D2A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_900_v119(uint64_t kernbase) {
@@ -265,6 +293,10 @@ static void patch_900_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x271602), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x884BE), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0xE12A5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x30BB9A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_903_v119(uint64_t kernbase) {
@@ -298,6 +330,10 @@ static void patch_903_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x271282), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x884BE), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0xE1255), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x30B83A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_950_v119(uint64_t kernbase) {
@@ -331,6 +367,10 @@ static void patch_950_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x201E12), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x19E66E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x2C61E5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x10EDCA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1000_v119(uint64_t kernbase) {
@@ -364,6 +404,10 @@ static void patch_1000_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x472E72), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x3999AE), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0xA90A5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x3D42DA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1071_v119(uint64_t kernbase) {
@@ -397,6 +441,10 @@ static void patch_1071_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0xD74C2), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x482D4E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x472255), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x150BDA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1100_v119(uint64_t kernbase) {
@@ -430,6 +478,10 @@ static void patch_1100_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2DDF42), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x36434E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x1DE9A5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x5147A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1102_v119(uint64_t kernbase) {
@@ -463,6 +515,10 @@ static void patch_1102_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2DDF62), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x36436E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x1DE9C5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x5147A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1150_v119(uint64_t kernbase) {
@@ -496,6 +552,10 @@ static void patch_1150_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD4F2), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x30390E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x135705), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4ABA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1200_v119(uint64_t kernbase) {
@@ -529,6 +589,10 @@ static void patch_1200_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD5D2), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x303B4E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x135705), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4B9A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1250_v119(uint64_t kernbase) {
@@ -562,6 +626,10 @@ static void patch_1250_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD612), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x303B8E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x135745), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4BDA), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1300_v119(uint64_t kernbase) {
@@ -595,6 +663,10 @@ static void patch_1300_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD632), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x303BAE), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x135745), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4BFA), "\x90\x90\x90\x90\x90", 5);
 }
 
 // 13.02 and 13.04 share an identical kernel layout (verified: every patch site matches).
@@ -629,6 +701,10 @@ static void patch_1304_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD642), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x303BBE), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x135745), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4C0A), "\x90\x90\x90\x90\x90", 5);
 }
 
 static void patch_1350_v119(uint64_t kernbase) {
@@ -662,6 +738,10 @@ static void patch_1350_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2BD652), "\x90\x90", 2);
 
     memcpy((void *)(kernbase + 0x303F0E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x135745), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4C1A), "\x90\x90\x90\x90\x90", 5);
 }
 
 void patch_kernel() {
