@@ -136,18 +136,58 @@ client-side `keystone.dll` when applying `VarType.ASM` patches.
 - **AOB scan** (`CMD_PROC_SCAN_AOB`) - byte patterns with `??` wildcards.
 - **Multi-pattern AOB scan** (`CMD_PROC_SCAN_AOB_MULTI`) - many patterns in
   one pass, scanned by region-parallel worker threads.
-- **Turbo Scan** (`0xBDAACC10` - `0xBDAACC17`) - a high-throughput scan engine
-  with a SIMD comparator, a page-table **aliasing** read path (reads target
-  physical pages via the server's own VA instead of per-chunk copies),
-  **server-resident** survivor sets (narrowing passes never ship the full
-  address list), and worker-thread **parallel** compare. Covers both known-value
-  scanning (Phase A) and snapshot / unknown-initial-value scanning (Phase B).
-  Capabilities are negotiated via a `CAPS` query; all flags are opt-in per
-  request. A long scan can be **cancelled mid-flight** (`0xBDAACC17`, sent from a
-  second connection) - handy for aborting a snapshot / unknown-value scan over a
-  huge region. Raw-literal opcodes; see [PROTOCOL.md](PROTOCOL.md) §2.2 / §7.4.
-- **Auth-gated** - all scan commands (classic, AOB, and Turbo except its `CAPS`
-  probe) require a prior `CMD_PROC_AUTH` handshake.
+- **Auth-gated** - the classic value scan, both AOB scans, and the iterative trio
+  all require a prior `CMD_PROC_AUTH` handshake.
+
+### Turbo Scan family (v1.3.0, additive + capability-gated)
+A faster, opt-in scan path (`0xBDAACC10`-`0xBDAACC17`) that runs alongside the
+unchanged classic / iterative / AOB scanners. A client detects it via
+`CMD_PROC_TURBOSCAN_CAPS` (`0xBDAACC10`) and falls back to the iterative trio when
+it (or a specific engine) is absent. Result format mirrors the iterative scan, so
+clients reuse one parser. Raw-literal opcodes (no `CMD_*` macro); see
+[PROTOCOL.md](PROTOCOL.md) §2.2 / §7.4.
+- **SIMD comparator** (`TSE_SIMD_COMPARE`) - typed exact-match inner loop. The PS4
+  is AMD Jaguar (AVX1, **no AVX2**), so it uses a 256-bit YMM load with a dual
+  128-bit `PCMPEQD` recombine - byte-identical results to the AVX2 path, without the
+  `#UD` a 256-bit integer compare would raise.
+- **Server-resident result sets** (`TSE_SERVER_RESIDENT`) - the survivor set can
+  live in a per-connection server buffer instead of being re-uploaded each pass;
+  rescans refresh each survivor's baseline so "since last scan" deltas work without
+  the client holding state. `CMD_PROC_TURBOSCAN_GET` fetches values on demand.
+- **Unknown-initial-value scans** (`TSE_SNAPSHOT`) - a membership bitmap + value
+  snapshot (RAM, or a `/data` file for large regions) drives
+  increased/decreased/changed narrowing with no known starting value. By default
+  the seed **drops all-zero slots**; `TS_SNAPSHOT_INCLUDE_ZEROS` keeps them.
+- **Multi-segment scans** (`TSE_SNAPSHOT_SEGMENTS`) - one session can cover a list
+  of disjoint regions instead of a single contiguous range, so a scattered
+  module/section selection uses the server-side path and never reads the gaps
+  between segments.
+- **Snapshot storage tuning** (`TSE_SNAPSHOT_CONFIG`, `CMD_PROC_TURBOSCAN_CONFIG`) -
+  the client can set the RAM threshold (how large the value store may grow before it
+  spills to disk; default 512 MiB) and the spill directory (default `/data`; a USB
+  mount can be faster). Spill writes use 16 MiB chunks.
+- **Aliasing read engine** (`TSE_ALIASING`, opt-in, default off) - maps the target's
+  physical pages into the server's address space via guarded page-table writes so the
+  scan reads in place instead of copying. Enabled per request with `TS_USE_ALIASING`;
+  always falls back to the normal read path on any guard/verify miss (mdbg is the floor).
+- **Parallel compare** (`TSE_PARALLEL_COMPARE`, opt-in, default off) - with
+  `TS_PARALLEL_COMPARE` on an aliased exact-match streaming scan, the server splits
+  the work across worker threads. For **single-connection** clients; a
+  multi-connection client parallelizes by opening more connections instead (don't set
+  both - they over-subscribe). Same wire result either way.
+- **Rescan aliasing** (`TSE_RESCAN_ALIASING`, opt-in, default off) - with
+  `TS_RESCAN_ALIASING` on a `COUNT` rescan, dense (gap-bridged) survivor windows read
+  via the aliasing engine instead of mdbg; scattered windows and any alias miss stay
+  on mdbg. The survivor set is per-connection, so single-connection by nature.
+- **Region classify** (`0xBDAACC16`) - returns every readable region with its cache
+  attribute (uncached `PCD` leaf-PTE bit) and a measured read throughput, so the
+  client can offer a per-region "exclude uncached/slow" choice. The server never
+  drops anything - exclusion is the client's opt-in, user-overridable decision.
+- **Cancel** (`0xBDAACC17`) - abort a long scan mid-flight (e.g. an unknown-value
+  snapshot over a huge region). Sent from a second connection, since the scanning
+  connection is busy streaming; a cancelled snapshot create returns `snapshot_ok=0`.
+- **Auth-gated** - every turbo command except `CMD_PROC_TURBOSCAN_CAPS` requires a
+  prior `CMD_PROC_AUTH` handshake.
 
 ### System UI integration
 - **Push notifications** to the user's screen
@@ -235,8 +275,13 @@ struct cmd_packet {
 };
 ```
 
-Followed by the command's fixed request struct (if any), any trailing
-variable-length payload, and a `uint32_t` status code reply.
+Followed by the command's fixed request struct (if any) and any trailing
+variable-length payload. The reply shape is per-command: most replies begin with a
+`uint32_t` status word (`CMD_SUCCESS = 0x80000000`, sent **raw** - PS4 does not
+bit-swap the status word, unlike PS5), some send two (e.g. `KERN_WRITE`, bulk write,
+and the `SET*REGS` / set-FS/GS-base data-phase commands), and the info/version
+commands send their data with no status word at all - see
+[PROTOCOL.md](PROTOCOL.md) for the exact sequence of each.
 
 **Full protocol specification:** [PROTOCOL.md](PROTOCOL.md) - 68 commands, every
 packet struct, every enum, every status code, and the kernel-side syscall
@@ -322,7 +367,7 @@ every command, response, and async interrupt packet.
 │   ├── source/              # server, proc, debug, kern, net, console handlers
 │   ├── include/             # protocol.h, debug.h, kern.h, ...
 │   ├── third_party/zydis/   # Zydis amalgamation (decoder-only)
-│   └── PROTOCOL.md          # complete wire-protocol reference
+│   └── PROTOCOL.md          # pointer to the root PROTOCOL.md (canonical spec)
 │
 ├── kdebugger/               # kernel module (installs sys_proc_* / sys_kern_*)
 │   └── source/              # elf, hooks, proc, main
@@ -333,6 +378,21 @@ every command, response, and async interrupt packet.
 ├── ps4-payload-sdk/         # libPS4 - freestanding runtime for userland
 └─── ps4-ksdk/                # libKSDK - kernel-side helpers
 ```
+
+---
+
+## Vendored dependencies
+
+Everything the payload needs is checked in (under `debugger/third_party/` plus the
+two SDK trees), so a clean checkout builds without fetching anything:
+
+- **Keystone** 0.9.2-based fork - the on-console x86-64 assembler (`0xBDAA0024`),
+  built x86-only (`-fno-exceptions -fno-rtti`, static).
+- **Zydis** amalgamation - decoder-only disassembler (`ZYAN_NO_LIBC`, `-DNDEBUG`).
+- **libc++ / libc++abi / libunwind** (`debugger/third_party/cxxrt`) - the C++
+  runtime the Keystone C++ translation units link against.
+- **libPS4** (`ps4-payload-sdk`) - freestanding userland runtime; **libKSDK**
+  (`ps4-ksdk`) - kernel-side helpers for the companion module.
 
 ---
 
@@ -348,6 +408,8 @@ every command, response, and async interrupt packet.
   side-channel interrupt architecture, and multi-FW patch table.
 - **Zydis** - x86 disassembler used in decoder-only mode
   (`ZYAN_NO_LIBC`, `-DNDEBUG`). Third-party, unmodified; MIT-licensed.
+- **Keystone** - LLVM-MC-based assembler (0.9.2-based fork); cross-compiled here
+  for the PS4 payload (x86-only, `-fno-exceptions -fno-rtti`, static).
 
 ---
 
