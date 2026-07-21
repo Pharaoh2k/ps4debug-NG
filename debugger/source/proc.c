@@ -979,8 +979,8 @@ bool proc_scan_legacy_compareValues(cmd_proc_scan_comparetype cmpType,
              case valTypeFloat:  return *(float *)pMemoryValue == (*(float *)pExtraValue + *(float *)pScanValue);
              case valTypeDouble: {
 
-                double scan_as_float = (double)(*(float *)pScanValue);
-                return *(double *)pMemoryValue == (*(double *)pExtraValue + scan_as_float);
+                double delta_d = *(double *)pScanValue;
+                return *(double *)pMemoryValue == (*(double *)pExtraValue + delta_d);
              }
              case valTypeArrBytes:
              case valTypeString: return false;
@@ -1021,8 +1021,8 @@ bool proc_scan_legacy_compareValues(cmd_proc_scan_comparetype cmpType,
              case valTypeFloat:  return *(float *)pMemoryValue == (*(float *)pExtraValue - *(float *)pScanValue);
              case valTypeDouble: {
 
-                double scan_as_float = (double)(*(float *)pScanValue);
-                return *(double *)pMemoryValue == (*(double *)pExtraValue - scan_as_float);
+                double delta_d = *(double *)pScanValue;
+                return *(double *)pMemoryValue == (*(double *)pExtraValue - delta_d);
              }
              case valTypeArrBytes:
              case valTypeString: return false;
