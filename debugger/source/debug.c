@@ -567,6 +567,33 @@ int debug_set_breakpoint_handle(int fd, struct cmd_packet *packet) {
 
     struct debug_bp *slot = &g_debug_ctx.bp[bp->index];
     if (bp->enabled) {
+        if (bp->address == 0) {
+            scePthreadMutexUnlock(&g_debug_mutex);
+            net_send_int32(fd, CMD_ERROR);
+            return 0;
+        }
+
+        if (slot->enabled) {
+            if (slot->address == bp->address) {
+                scePthreadMutexUnlock(&g_debug_mutex);
+                net_send_int32(fd, CMD_SUCCESS);
+                return 0;
+            }
+            scePthreadMutexUnlock(&g_debug_mutex);
+            net_send_int32(fd, CMD_ERROR);
+            return 0;
+        }
+
+        for (int i = 0; i < MAX_BPS; i++) {
+            if (i != (int)bp->index
+                && g_debug_ctx.bp[i].enabled
+                && g_debug_ctx.bp[i].address == bp->address) {
+                scePthreadMutexUnlock(&g_debug_mutex);
+                net_send_int32(fd, CMD_ERROR);
+                return 0;
+            }
+        }
+
         slot->enabled = 1;
         slot->address = bp->address;
 
