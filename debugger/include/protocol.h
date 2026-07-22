@@ -307,6 +307,8 @@ struct cmd_proc_scan_count_packet {
 #define TSE_SNAPSHOT_PREVIOUS 0x00000080u
 #define TSE_PARALLEL_COMPARE  0x00000100u
 #define TSE_RESCAN_ALIASING   0x00000200u
+#define TSE_FLOAT_POLICY      0x00000400u
+#define TSE_COMPACT_SIMPLE_SNAPSHOT 0x00000800u
 
 #define TS_USE_ALIASING           0x00000001u
 #define TS_SERVER_RESIDENT        0x00000002u
@@ -317,6 +319,10 @@ struct cmd_proc_scan_count_packet {
 #define TS_SNAPSHOT_KEEP_PREVIOUS 0x00000040u
 #define TS_PARALLEL_COMPARE       0x00000080u
 #define TS_RESCAN_ALIASING        0x00000100u
+#define TS_FLOAT_SIMPLE           0x00000200u
+#define TS_FLOAT_EXACT            0x00000400u
+#define TS_FLOAT_EXPONENT_SHIFT   16u
+#define TS_FLOAT_EXPONENT_MASK    0x007F0000u
 
 struct cmd_proc_turboscan_start_packet {
     uint32_t pid;

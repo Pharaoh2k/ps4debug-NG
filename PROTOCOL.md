@@ -459,7 +459,8 @@ family). Flag/engine bit tables are in §7.4.
 - **Request body:** none.
 - **Response:** `CMD_SUCCESS`, `struct cmd_proc_turboscan_caps_response` (16 bytes):
   `{u32 version(=1); u32 engines(TSE_* bitmask); u32 max_threads(=4); u32 reserved;}`.
-  A release build reports `engines = 0x3FF` (all engines, Phase A + Phase B).
+  A release build reports `engines = 0x7FF` (all engines, Phase A + Phase B,
+  including negotiated float-policy offload).
   Clients call this first and gate their UI on the bits they see.
 
 ##### `0xBDAACC11` START - `proc_turboscan_start_handle` (auth bit 1)
@@ -990,6 +991,8 @@ All structs are `__attribute__((packed))`. Sizes match the `CMD_*_PACKET_SIZE` m
 | `0x00000080` | `TSE_SNAPSHOT_PREVIOUS` | compare vs previous snapshot                   |
 | `0x00000100` | `TSE_PARALLEL_COMPARE`  | worker-thread parallel compare                 |
 | `0x00000200` | `TSE_RESCAN_ALIASING`   | aliasing on rescan (`COUNT`) too               |
+| `0x00000400` | `TSE_FLOAT_POLICY`      | negotiated Simple/exact float policy           |
+| `0x00000800` | `TSE_COMPACT_SIMPLE_SNAPSHOT` | Simple float snapshots store survivor records only |
 
 `TS_*` - per-request opt-in flags in `START` / `COUNT` `flags`:
 
@@ -1004,6 +1007,23 @@ All structs are `__attribute__((packed))`. Sizes match the `CMD_*_PACKET_SIZE` m
 | `0x00000040` | `TS_SNAPSHOT_KEEP_PREVIOUS` | retain previous snapshot for later compares |
 | `0x00000080` | `TS_PARALLEL_COMPARE`       | request parallel compare                     |
 | `0x00000100` | `TS_RESCAN_ALIASING`        | use aliasing on the `COUNT` rescan           |
+| `0x00000200` | `TS_FLOAT_SIMPLE`           | filter every float/double result by exponent distance |
+| `0x00000400` | `TS_FLOAT_EXACT`            | exact-value float/double uses numeric IEEE equality |
+
+With `TS_FLOAT_SIMPLE`, bits 16-22 carry the 7-bit exponent-distance threshold
+(`TS_FLOAT_EXPONENT_MASK = 0x007F0000`, shift 16). Values 1-127 are literal;
+zero defensively means 11. Clients send these fields only when CAPS advertises
+`TSE_FLOAT_POLICY`. The policy applies during streaming START, snapshot seeding,
+and all snapshot-resident, list-resident, and client-driven COUNT paths.
+
+When CAPS also advertises `TSE_COMPACT_SIMPLE_SNAPSHOT`, snapshot creation with
+`TS_FLOAT_SIMPLE` filters each float/double before it is stored. The session keeps
+one address-sorted record per survivor (`address`, current, and optional Previous/
+First values), allocates no raw-slot bitmap, and compacts that record stream again
+after every narrow. Initial RAM/file size and write I/O therefore scale with the
+survivor count, not the raw slot count. Clients must not infer this storage contract
+from `TSE_FLOAT_POLICY` alone: an older policy-capable server may still use dense
+snapshot backing.
 
 ---
 

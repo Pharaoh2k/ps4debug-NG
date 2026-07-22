@@ -5,6 +5,7 @@
 #define SCAN_TURBO_SIZET_FROM_PS4 1
 #include "scan_turbo.h"
 #include "proc.h"
+#include "scan_float_policy.h"
 #include "kdbg.h"
 #include "scan_alias.h"
 #include "proc_ptwalk.h"
@@ -17,6 +18,32 @@ extern bool   proc_scan_compareValues(cmd_proc_scan_comparetype cmpType,
                                       unsigned char *pExtraValue, unsigned char *pMask);
 
 #define g_proc_auth_state g_proc_auth_bits
+
+static inline int turboscan_policy_compare(uint32_t flags,
+                                           unsigned char compare_type,
+                                           unsigned char value_type,
+                                           uint64_t value_length,
+                                           int turbo_compare,
+                                           const uint8_t *scan_value,
+                                           const uint8_t *memory_value,
+                                           const uint8_t *previous_value,
+                                           const uint8_t *mask) {
+    int matched;
+    if ((flags & TS_FLOAT_EXACT) && compare_type == 0
+        && ts_float_policy_is_float(value_type)) {
+        matched = ts_float_policy_exact_equal(value_type, memory_value, scan_value);
+    } else {
+        matched = turbo_compare
+            ? scan_point_compare(compare_type, value_type,
+                                 memory_value, scan_value, previous_value)
+            : (int)proc_scan_compareValues(compare_type, value_type, value_length,
+                                           (uint8_t *)scan_value,
+                                           (uint8_t *)memory_value,
+                                           (uint8_t *)previous_value,
+                                           (uint8_t *)mask);
+    }
+    return matched && ts_float_policy_simple_value(flags, value_type, memory_value);
+}
 
 static inline void proc_read_mem(uint32_t pid, uint64_t addr, uint64_t len, void *buf) {
     sys_proc_rw(pid, addr, buf, len, 0);
@@ -39,6 +66,9 @@ static long fs_pread(int fd, void *buf, unsigned long n, long off) {
 }
 static long fs_pwrite(int fd, const void *buf, unsigned long n, long off) {
     return (long)syscall(476, (long)fd, (long)buf, (long)n, off);
+}
+static int fs_ftruncate(int fd, uint64_t len) {
+    return (int)syscall(480, (long)fd, (long)len);
 }
 
 static const uint8_t g_cmptype_needs_value[16]    = {1,1,1,1,1,0,1,0,1,0,0,0,1,0,0,0};
@@ -115,6 +145,7 @@ int scan_turbo_regions(uint32_t pid, int mode, uint32_t min_mbps,
 
 #define TS_RESCAN_GAP_MAX  0x8000ULL
 #define TS_RESCAN_WIN_CAP  0x100000ULL
+#define TS_COMPACT_BATCH_BYTES 0x100000ULL
 
 #define TS_RESCAN_ALIAS_MIN_WIN 0x10000ULL
 
@@ -144,6 +175,7 @@ struct turboscan_session {
     uint8_t *snap_ram;
     int      snap_fd;
     uint64_t snap_bytes;
+    uint8_t  compact_snapshot;
 
     int      first_fd;
     uint8_t  has_first;
@@ -228,6 +260,115 @@ static int snap_store_write(uint8_t *ram, uint64_t ram_bytes, int fd,
     return fs_pwrite_all(fd, src + a, len - a, 0);
 }
 
+static void *fs_mmap_anon(uint64_t n);
+static void fs_munmap(void *p, uint64_t n);
+
+static int fs_compact_store_finalize(const char *path, int *fd_io,
+                                     uint8_t **ram_out, uint64_t *ram_bytes_out,
+                                     uint64_t total_bytes, uint64_t rec_size,
+                                     uint8_t *scratch, uint64_t scratch_bytes) {
+    int fd = *fd_io;
+    *ram_out = NULL;
+    *ram_bytes_out = 0;
+    if (total_bytes == 0) {
+        if (fd >= 0) close(fd);
+        unlink(path);
+        *fd_io = -1;
+        return 1;
+    }
+    if (fd < 0 || rec_size == 0) return 0;
+
+    uint64_t cap = g_turboscan_snap_ram_thresh;
+    uint64_t ram_bytes = (total_bytes <= cap)
+        ? total_bytes : (cap / rec_size) * rec_size;
+    if (ram_bytes == 0) {
+        if (fs_ftruncate(fd, total_bytes) != 0) return 0;
+        return 1;
+    }
+
+    uint8_t *ram = (uint8_t *)fs_mmap_anon(ram_bytes);
+    if (!ram) {
+
+        if (fs_ftruncate(fd, total_bytes) != 0) return 0;
+        return 1;
+    }
+    if (!fs_pread_all(fd, ram, ram_bytes, 0)) {
+        fs_munmap(ram, ram_bytes);
+        return 0;
+    }
+
+    if (ram_bytes == total_bytes) {
+        close(fd);
+        unlink(path);
+        *fd_io = -1;
+        *ram_out = ram;
+        *ram_bytes_out = ram_bytes;
+        return 1;
+    }
+
+    if (!scratch || scratch_bytes == 0) {
+        fs_munmap(ram, ram_bytes);
+        return 1;
+    }
+
+    uint64_t suffix = total_bytes - ram_bytes;
+    for (uint64_t off = 0; off < suffix; ) {
+        uint64_t n = suffix - off;
+        if (n > scratch_bytes) n = scratch_bytes;
+        if (!fs_pread_all(fd, scratch, n, ram_bytes + off)
+            || !fs_pwrite_all(fd, scratch, n, off)) {
+            fs_munmap(ram, ram_bytes);
+            return 0;
+        }
+        off += n;
+    }
+    if (fs_ftruncate(fd, suffix) != 0) {
+        fs_munmap(ram, ram_bytes);
+        return 0;
+    }
+    *ram_out = ram;
+    *ram_bytes_out = ram_bytes;
+    return 1;
+}
+
+static void fs_compact_store_trim(struct turboscan_session *s,
+                                  uint64_t new_bytes) {
+    uint64_t old_ram_bytes = s->snap_bytes;
+    if (new_bytes == 0) {
+        fs_munmap(s->snap_ram, old_ram_bytes);
+        s->snap_ram = NULL;
+        s->snap_bytes = 0;
+        if (s->snap_fd >= 0) close(s->snap_fd);
+        s->snap_fd = -1;
+        return;
+    }
+
+    if (new_bytes <= g_turboscan_snap_ram_thresh
+        && new_bytes != old_ram_bytes) {
+        uint8_t *ram = (uint8_t *)fs_mmap_anon(new_bytes);
+        if (ram && snap_store_read(s->snap_ram, old_ram_bytes, s->snap_fd,
+                                   ram, 0, new_bytes)) {
+            fs_munmap(s->snap_ram, old_ram_bytes);
+            if (s->snap_fd >= 0) close(s->snap_fd);
+            s->snap_ram = ram;
+            s->snap_bytes = new_bytes;
+            s->snap_fd = -1;
+            return;
+        }
+        fs_munmap(ram, new_bytes);
+    }
+
+    if (new_bytes <= old_ram_bytes) {
+        if (s->snap_fd >= 0) {
+            fs_ftruncate(s->snap_fd, 0);
+            close(s->snap_fd);
+            s->snap_fd = -1;
+        }
+    } else if (s->snap_fd >= 0) {
+        fs_ftruncate(s->snap_fd, new_bytes - old_ram_bytes);
+    }
+}
+
 static void *fs_mmap_anon(uint64_t n) {
 
     void *m = (void *)syscall(477, 0L, (long)n, 3L, 0x1002L, -1L, 0L);
@@ -264,15 +405,15 @@ void turboscan_session_free_idx(unsigned char idx) {
     fs_munmap(s->bitmap,   s->bitmap_bytes);
     if (s->seg) free(s->seg);
     if (s->mode == TS_MODE_SNAPSHOT) {
-        if (s->snap_fd > 0) close(s->snap_fd);
+        if (s->snap_fd >= 0) close(s->snap_fd);
         char path[96];
         fs_snap_path(idx, path);
         unlink(path);
-        if (s->first_fd > 0) close(s->first_fd);
+        if (s->first_fd >= 0) close(s->first_fd);
         char fpath[96];
         fs_first_path(idx, fpath);
         unlink(fpath);
-        if (s->prev_fd > 0) close(s->prev_fd);
+        if (s->prev_fd >= 0) close(s->prev_fd);
         fs_prev_path(idx, fpath);
         unlink(fpath);
     }
@@ -352,9 +493,14 @@ static int fs_snapshot_create(int fd, unsigned char idx,
     }
 
     uint64_t slot_count = 0, total_bytes = 0;
+    int layout_ok = 1;
     for (uint32_t g = 0; g < in_nseg; g++) {
         uint64_t len = in_segs[g].length;
         uint64_t ns  = (len >= value_length) ? ((len - value_length) / step + 1) : 0;
+        if (slot_count > ~0ULL - ns || total_bytes > ~0ULL - len) {
+            layout_ok = 0;
+            break;
+        }
         seg[g].addr = in_segs[g].address;
         seg[g].slot_start = slot_count;
         seg[g].nslots = ns;
@@ -362,11 +508,21 @@ static int fs_snapshot_create(int fd, unsigned char idx,
         total_bytes += len;
     }
 
+    if (!layout_ok || slot_count > ~0ULL / value_length) {
+        layout_ok = 0;
+        slot_count = 0;
+        total_bytes = 0;
+    }
+
+    int compact = (sp->flags & TS_FLOAT_SIMPLE)
+               && ts_float_policy_is_float(sp->valueType);
     uint64_t snap_bytes   = slot_count * value_length;
-    uint64_t bitmap_bytes = (slot_count + 7) >> 3;
+    uint64_t bitmap_bytes = (slot_count >> 3) + ((slot_count & 7) != 0);
+    uint64_t compact_rec_size = 8 + value_length
+                              * (1 + (keep_prev ? 1 : 0) + (keep_first ? 1 : 0));
 
     int      include_zeros = (sp->flags & TS_SNAPSHOT_INCLUDE_ZEROS) != 0;
-    uint64_t survivors = slot_count;
+    uint64_t survivors = compact ? 0 : slot_count;
 
     struct cmd_proc_turboscan_snap_plan plan;
     plan.slot_count = slot_count;
@@ -374,7 +530,7 @@ static int fs_snapshot_create(int fd, unsigned char idx,
     net_send_all(fd, &plan, sizeof(plan));
 
     uint8_t *bitmap = NULL, *snap_ram = NULL;
-    int      snap_fd = -1, use_file = 0, ok = 1, fail = 0;
+    int      snap_fd = -1, use_file = 0, ok = layout_ok, fail = 0;
     uint64_t ram_bytes = 0;
     int      first_fd = -1;
     int      prev_fd  = -1;
@@ -384,42 +540,50 @@ static int fs_snapshot_create(int fd, unsigned char idx,
     fs_prev_path(idx, ppath);
 
     if (slot_count > 0) {
-        if (bitmap_bytes > TS_SNAP_BITMAP_MAX) { ok = 0; }
-        if (ok && !(bitmap = (uint8_t *)fs_mmap_anon(bitmap_bytes))) {
-            ok = 0;
-        }
-        if (ok) {
-            uint64_t cap = g_turboscan_snap_ram_thresh;
-            if (snap_bytes <= cap) {
+        if (compact) {
 
-                snap_ram = (uint8_t *)fs_mmap_anon(snap_bytes);
-                if (snap_ram) ram_bytes = snap_bytes;
-                else          use_file  = 1;
-            } else {
-                use_file = 1;
+            if (!pack_buf || compact_rec_size < 8 + value_length
+                || (snap_fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) {
+                ok = 0;
             }
-            if (use_file) {
+        } else {
+            if (bitmap_bytes > TS_SNAP_BITMAP_MAX) { ok = 0; }
+            if (ok && !(bitmap = (uint8_t *)fs_mmap_anon(bitmap_bytes))) {
+                ok = 0;
+            }
+            if (ok) {
+                uint64_t cap = g_turboscan_snap_ram_thresh;
+                if (snap_bytes <= cap) {
 
-                if (snap_bytes > cap && cap >= value_length && snap_ram == NULL) {
-                    uint64_t cache = (cap / value_length) * value_length;
-                    snap_ram = (uint8_t *)fs_mmap_anon(cache);
-                    if (snap_ram) ram_bytes = cache;
+                    snap_ram = (uint8_t *)fs_mmap_anon(snap_bytes);
+                    if (snap_ram) ram_bytes = snap_bytes;
+                    else          use_file  = 1;
+                } else {
+                    use_file = 1;
                 }
-                if (step != value_length && !pack_buf) { ok = 0; }
-                else if ((snap_fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) { ok = 0; }
+                if (use_file) {
+
+                    if (snap_bytes > cap && cap >= value_length && snap_ram == NULL) {
+                        uint64_t cache = (cap / value_length) * value_length;
+                        snap_ram = (uint8_t *)fs_mmap_anon(cache);
+                        if (snap_ram) ram_bytes = cache;
+                    }
+                    if (step != value_length && !pack_buf) { ok = 0; }
+                    else if ((snap_fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) { ok = 0; }
+                }
             }
-        }
-        if (ok && keep_first) {
+            if (ok && keep_first) {
 
-            if (step != value_length && !pack_buf) keep_first = 0;
-            else if ((first_fd = open(fpath, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) keep_first = 0;
-        }
-        if (ok && keep_prev) {
+                if (step != value_length && !pack_buf) keep_first = 0;
+                else if ((first_fd = open(fpath, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) keep_first = 0;
+            }
+            if (ok && keep_prev) {
 
-            if (step != value_length && !pack_buf) keep_prev = 0;
-            else if ((prev_fd = open(ppath, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) keep_prev = 0;
+                if (step != value_length && !pack_buf) keep_prev = 0;
+                else if ((prev_fd = open(ppath, O_RDWR | O_CREAT | O_TRUNC, 0666)) < 0) keep_prev = 0;
+            }
+            if (ok) memset(bitmap, 0xFF, bitmap_bytes);
         }
-        if (ok) memset(bitmap, 0xFF, bitmap_bytes);
 
         uint64_t done = 0;
         for (uint32_t g = 0; ok && !fail && g < in_nseg; g++) {
@@ -428,6 +592,11 @@ static int fs_snapshot_create(int fd, unsigned char idx,
                 if (turbo_cancel_pending(sp->pid)) { fail = 1; break; }
                 uint64_t win_slots = chunk_size / step;
                 if (win_slots == 0) win_slots = 1;
+                if (compact) {
+                    uint64_t compact_slots = chunk_size / compact_rec_size;
+                    if (compact_slots == 0) { fail = 1; break; }
+                    if (win_slots > compact_slots) win_slots = compact_slots;
+                }
                 if (s0 + win_slots > seg_ns) win_slots = seg_ns - s0;
                 uint64_t gslot  = seg[g].slot_start + s0;
                 uint64_t waddr  = seg_base + s0 * step;
@@ -437,37 +606,72 @@ static int fs_snapshot_create(int fd, unsigned char idx,
 
                 if (g_turboscan_snap_force_fail) { fail = 1; break; }
 
-                uint64_t pbytes = win_slots * value_length;
-
-                const uint8_t *psrc = NULL;
-                if (use_file || keep_first || keep_prev) {
-                    if (step == value_length) {
-                        psrc = read_buf;
-                    } else {
-                        for (uint64_t k = 0; k < win_slots; k++)
-                            memcpy(pack_buf + k * value_length, read_buf + k * step, value_length);
-                        psrc = pack_buf;
-                    }
-                }
-                if (use_file) {
-                    if (!snap_store_write(snap_ram, ram_bytes, snap_fd, psrc,
-                                          gslot * value_length, pbytes)) { fail = 1; break; }
-                } else if (step == value_length) {
-                    memcpy(snap_ram + gslot * value_length, read_buf, pbytes);
-                } else {
-                    for (uint64_t k = 0; k < win_slots; k++)
-                        memcpy(snap_ram + (gslot + k) * value_length, read_buf + k * step, value_length);
-                }
-                if (keep_first &&
-                    !fs_pwrite_all(first_fd, psrc, pbytes, gslot * value_length)) { fail = 1; break; }
-                if (keep_prev &&
-                    !fs_pwrite_all(prev_fd, psrc, pbytes, gslot * value_length)) { fail = 1; break; }
-                if (!include_zeros) {
+                if (compact) {
+                    uint64_t accepted = 0;
                     for (uint64_t k = 0; k < win_slots; k++) {
                         const uint8_t *v = read_buf + k * step;
                         uint64_t b = 0;
                         while (b < value_length && v[b] == 0) b++;
-                        if (b == value_length) { fs_bm_clear(bitmap, gslot + k); survivors--; }
+                        if ((!include_zeros && b == value_length)
+                            || !ts_float_policy_simple_value(sp->flags,
+                                                             sp->valueType, v)) continue;
+
+                        uint8_t *rec = pack_buf + accepted * compact_rec_size;
+                        uint64_t addr = waddr + k * step;
+                        uint64_t off = 8;
+                        memcpy(rec, &addr, 8);
+                        memcpy(rec + off, v, value_length); off += value_length;
+                        if (keep_prev)  { memcpy(rec + off, v, value_length); off += value_length; }
+                        if (keep_first) { memcpy(rec + off, v, value_length); }
+                        accepted++;
+                    }
+                    if (accepted) {
+                        if (survivors > ~0ULL / compact_rec_size - accepted) {
+                            fail = 1; break;
+                        }
+                        uint64_t bytes = accepted * compact_rec_size;
+                        if (!fs_pwrite_all(snap_fd, pack_buf, bytes,
+                                           survivors * compact_rec_size)) {
+                            fail = 1; break;
+                        }
+                        survivors += accepted;
+                    }
+                } else {
+                    uint64_t pbytes = win_slots * value_length;
+
+                    const uint8_t *psrc = NULL;
+                    if (use_file || keep_first || keep_prev) {
+                        if (step == value_length) {
+                            psrc = read_buf;
+                        } else {
+                            for (uint64_t k = 0; k < win_slots; k++)
+                                memcpy(pack_buf + k * value_length, read_buf + k * step, value_length);
+                            psrc = pack_buf;
+                        }
+                    }
+                    if (use_file) {
+                        if (!snap_store_write(snap_ram, ram_bytes, snap_fd, psrc,
+                                              gslot * value_length, pbytes)) { fail = 1; break; }
+                    } else if (step == value_length) {
+                        memcpy(snap_ram + gslot * value_length, read_buf, pbytes);
+                    } else {
+                        for (uint64_t k = 0; k < win_slots; k++)
+                            memcpy(snap_ram + (gslot + k) * value_length, read_buf + k * step, value_length);
+                    }
+                    if (keep_first &&
+                        !fs_pwrite_all(first_fd, psrc, pbytes, gslot * value_length)) { fail = 1; break; }
+                    if (keep_prev &&
+                        !fs_pwrite_all(prev_fd, psrc, pbytes, gslot * value_length)) { fail = 1; break; }
+                    if (!include_zeros) {
+                        for (uint64_t k = 0; k < win_slots; k++) {
+                            const uint8_t *v = read_buf + k * step;
+                            uint64_t b = 0;
+                            while (b < value_length && v[b] == 0) b++;
+                            if (b == value_length) {
+                                fs_bm_clear(bitmap, gslot + k);
+                                survivors--;
+                            }
+                        }
                     }
                 }
                 s0   += win_slots;
@@ -475,6 +679,13 @@ static int fs_snapshot_create(int fd, unsigned char idx,
                 net_send_all(fd, &done, 8);
             }
         }
+    }
+
+    if (compact && ok && !fail) {
+        uint64_t compact_bytes = survivors * compact_rec_size;
+        if (!fs_compact_store_finalize(path, &snap_fd, &snap_ram, &ram_bytes,
+                                       compact_bytes, compact_rec_size,
+                                       read_buf, chunk_size)) fail = 1;
     }
 
     uint64_t sentinel = 0xFFFFFFFFFFFFFFFFULL;
@@ -501,11 +712,18 @@ static int fs_snapshot_create(int fd, unsigned char idx,
     s->base = seg[0].addr; s->stride = step;
     s->snap_ram = snap_ram; s->snap_fd = snap_fd;
     s->snap_bytes = ram_bytes;
-    s->first_fd = keep_first ? first_fd : -1;
+    s->compact_snapshot = compact ? 1 : 0;
+    s->rec_size = compact ? compact_rec_size : 0;
+    s->first_fd = (!compact && keep_first) ? first_fd : -1;
     s->has_first = keep_first ? 1 : 0;
-    s->prev_fd = keep_prev ? prev_fd : -1;
+    s->prev_fd = (!compact && keep_prev) ? prev_fd : -1;
     s->has_prev = keep_prev ? 1 : 0;
-    s->seg = seg; s->nseg = in_nseg;
+    if (compact) {
+        free(seg);
+        s->seg = NULL; s->nseg = 0;
+    } else {
+        s->seg = seg; s->nseg = in_nseg;
+    }
     s->value_length = value_length; s->pid = sp->pid; s->valueType = sp->valueType;
 
     sum.snapshot_ok = 1; sum.survivor_count = survivors;
@@ -526,13 +744,116 @@ static const uint8_t *fs_rescan_window_read(scan_alias_ctx *actx, uint32_t pid,
     return mem_buf;
 }
 
+static uint64_t fs_compact_snapshot_rescan(int fd, struct turboscan_session *s,
+                                           unsigned char cmpType, unsigned char valType,
+                                           uint64_t value_length, int turbo_cmp, uint32_t flags,
+                                           const uint8_t *pattern, const uint8_t *mask,
+                                           const uint8_t *between_hi, int includes_prev,
+                                           uint8_t *mem_buf, uint8_t *record_buf,
+                                           scan_alias_ctx *actx) {
+    uint64_t old_count = s->survivor_count;
+    uint64_t rec_size = s->rec_size;
+    if (old_count == 0) return 0;
+    if (rec_size < 8 + value_length || rec_size > TS_COMPACT_BATCH_BYTES)
+        return old_count;
+
+    uint8_t *out_buf = (uint8_t *)net_alloc_buffer(TS_COMPACT_BATCH_BYTES);
+    if (!out_buf) return old_count;
+
+    uint64_t batch_cap = TS_COMPACT_BATCH_BYTES / rec_size;
+    uint64_t read_index = 0, write_index = 0;
+    uint64_t prev_off = 8 + value_length;
+    uint64_t first_off = prev_off + (s->has_prev ? value_length : 0);
+    int storage_ok = 1;
+
+    while (read_index < old_count && storage_ok) {
+        if (turbo_cancel_pending(s->pid)) break;
+        uint64_t batch = old_count - read_index;
+        if (batch > batch_cap) batch = batch_cap;
+        uint64_t batch_bytes = batch * rec_size;
+        if (!snap_store_read(s->snap_ram, s->snap_bytes, s->snap_fd,
+                             record_buf, read_index * rec_size, batch_bytes)) break;
+
+        uint64_t accepted = 0;
+        for (uint64_t i = 0; i < batch; ) {
+            if (turbo_cancel_pending(s->pid)) break;
+            uint8_t *first_rec = record_buf + i * rec_size;
+            uint64_t window_start;
+            memcpy(&window_start, first_rec, 8);
+            uint64_t covered_end = window_start + value_length;
+            uint64_t last = i;
+            for (uint64_t j = i + 1; j < batch; j++) {
+                uint64_t next_addr;
+                memcpy(&next_addr, record_buf + j * rec_size, 8);
+                if (next_addr < window_start) break;
+                uint64_t gap = (next_addr > covered_end) ? (next_addr - covered_end) : 0;
+                if (gap > TS_RESCAN_GAP_MAX) break;
+                uint64_t next_end = next_addr + value_length;
+                if (next_end < next_addr || next_end - window_start > TS_RESCAN_WIN_CAP) break;
+                if (next_end > covered_end) covered_end = next_end;
+                last = j;
+            }
+
+            uint64_t read_size = covered_end - window_start;
+            int win_aliased;
+            const uint8_t *win = fs_rescan_window_read(actx, s->pid,
+                window_start, read_size, mem_buf, &win_aliased);
+
+            for (uint64_t j = i; j <= last; j++) {
+                uint8_t *rec = record_buf + j * rec_size;
+                uint64_t addr;
+                memcpy(&addr, rec, 8);
+                const uint8_t *mem_ptr = win + (addr - window_start);
+                const uint8_t *prev_ptr = includes_prev ? (rec + 8) : between_hi;
+                int matched = turboscan_policy_compare(flags, cmpType, valType,
+                    value_length, turbo_cmp, pattern, mem_ptr, prev_ptr, mask);
+                if (!matched) continue;
+
+                uint8_t *out = out_buf + accepted * rec_size;
+                memcpy(out, &addr, 8);
+                memcpy(out + 8, mem_ptr, value_length);
+                if (s->has_prev)
+                    memcpy(out + prev_off, rec + 8, value_length);
+                if (s->has_first)
+                    memcpy(out + first_off, rec + first_off, value_length);
+                accepted++;
+            }
+            if (win_aliased) scan_alias_release(actx);
+            i = last + 1;
+        }
+
+        if (accepted && !snap_store_write(s->snap_ram, s->snap_bytes, s->snap_fd,
+                                           out_buf, write_index * rec_size,
+                                           accepted * rec_size)) {
+            storage_ok = 0;
+            break;
+        }
+        write_index += accepted;
+        read_index += batch;
+
+        uint64_t progress = (uint64_t)((double)read_index
+            * (double)s->slot_count / (double)old_count);
+        net_send_all(fd, &progress, 8);
+    }
+
+    free(out_buf);
+    s->survivor_count = write_index;
+    fs_compact_store_trim(s, write_index * rec_size);
+    return write_index;
+}
+
 static uint64_t fs_snapshot_rescan(int fd, struct turboscan_session *s,
                                    unsigned char cmpType, unsigned char valType,
-                                   uint64_t value_length, int turbo_cmp,
+                                   uint64_t value_length, int turbo_cmp, uint32_t flags,
                                    const uint8_t *pattern, const uint8_t *mask,
                                    const uint8_t *between_hi, int includes_prev,
                                    uint8_t *mem_buf, uint8_t *bl_buf,
                                    scan_alias_ctx *actx) {
+    if (s->compact_snapshot)
+        return fs_compact_snapshot_rescan(fd, s, cmpType, valType, value_length,
+                                          turbo_cmp, flags, pattern, mask,
+                                          between_hi, includes_prev, mem_buf,
+                                          bl_buf, actx);
     if (!s->bitmap || s->slot_count == 0) { s->survivor_count = 0; return 0; }
     uint64_t n = s->slot_count, survivors = 0;
     uint64_t rb = s->snap_bytes;
@@ -573,9 +894,9 @@ static uint64_t fs_snapshot_rescan(int fd, struct turboscan_session *s,
             const uint8_t *mem_ptr  = win + (addr - window_start);
             uint8_t       *base_ptr = bl + (k - i) * value_length;
             const uint8_t *prev_ptr = includes_prev ? base_ptr : between_hi;
-            int matched = turbo_cmp
-                ? scan_point_compare(cmpType, valType, mem_ptr, pattern, prev_ptr)
-                : (int)proc_scan_compareValues(cmpType, valType, value_length, pattern, mem_ptr, prev_ptr, mask);
+            int matched = turboscan_policy_compare(flags, cmpType, valType,
+                                                   value_length, turbo_cmp, pattern,
+                                                   mem_ptr, prev_ptr, mask);
             if (matched) { memcpy(base_ptr, mem_ptr, value_length); dirty = 1; survivors++; }
             else         { fs_bm_clear(s->bitmap, k); }
         }
@@ -588,9 +909,65 @@ static uint64_t fs_snapshot_rescan(int fd, struct turboscan_session *s,
     return survivors;
 }
 
+static uint32_t fs_compact_snapshot_get(int fd, struct turboscan_session *s,
+                                        uint32_t start, uint32_t count,
+                                        uint8_t *out_buf, uint64_t out_cap) {
+    uint64_t value_length = s->value_length;
+    uint64_t rec_size = s->rec_size;
+    uint64_t total = s->survivor_count;
+    uint32_t actual = 0;
+    if (start < total) {
+        uint64_t avail = total - start;
+        actual = (count < avail) ? count : (uint32_t)avail;
+    }
+
+    uint32_t hdr = actual | (s->has_first ? 0x80000000u : 0u);
+    net_send_all(fd, &hdr, 4);
+    if (actual == 0) return 0;
+
+    uint64_t ent_size = 8 + value_length * (s->has_first ? 3 : 2);
+    if (rec_size == 0 || ent_size == 0 || ent_size > out_cap) return 0;
+    uint64_t batch_cap = out_cap / ent_size;
+    uint64_t sent = 0;
+    while (sent < actual) {
+        uint64_t batch = actual - sent;
+        if (batch > batch_cap) batch = batch_cap;
+        uint64_t in_bytes = batch * rec_size;
+        if (!snap_store_read(s->snap_ram, s->snap_bytes, s->snap_fd,
+                             out_buf, ((uint64_t)start + sent) * rec_size,
+                             in_bytes)) {
+            memset(out_buf, 0, in_bytes);
+        }
+
+        if (!s->has_prev) {
+
+            for (uint64_t i = batch; i > 0; i--) {
+                uint8_t *in = out_buf + (i - 1) * rec_size;
+                uint8_t *out = out_buf + (i - 1) * ent_size;
+                uint64_t addr;
+                uint8_t current[8], first[8];
+                memcpy(&addr, in, 8);
+                memcpy(current, in + 8, value_length);
+                if (s->has_first)
+                    memcpy(first, in + 8 + value_length, value_length);
+                memcpy(out, &addr, 8);
+                memcpy(out + 8, current, value_length);
+                memcpy(out + 8 + value_length, current, value_length);
+                if (s->has_first)
+                    memcpy(out + 8 + 2 * value_length, first, value_length);
+            }
+        }
+        net_send_all(fd, out_buf, (int)(batch * ent_size));
+        sent += batch;
+    }
+    return actual;
+}
+
 static uint32_t fs_snapshot_get(int fd, struct turboscan_session *s,
                                 uint32_t start, uint32_t count,
                                 uint8_t *out_buf, uint64_t out_cap) {
+    if (s->compact_snapshot)
+        return fs_compact_snapshot_get(fd, s, start, count, out_buf, out_cap);
     uint64_t value_length = s->value_length, n = s->slot_count;
     int has_first = s->has_first;
     uint32_t actual = 0;
@@ -630,11 +1007,41 @@ static int fs_snapshot_materialize(unsigned char idx, struct turboscan_session *
     uint64_t vlen = s->value_length;
     int has_first = s->has_first, has_prev = s->has_prev;
 
+    if (s->compact_snapshot) {
+        uint64_t records = s->survivor_count;
+        uint64_t rec_size = s->rec_size;
+        if (records == 0 || rec_size == 0
+            || records > TS_RESIDENT_CAP / rec_size) return 0;
+        uint64_t bytes = records * rec_size;
+        void *buf = fs_mmap_anon(bytes);
+        if (!buf) return 0;
+        if (!snap_store_read(s->snap_ram, s->snap_bytes, s->snap_fd,
+                             (uint8_t *)buf, 0, bytes)) {
+            fs_munmap(buf, bytes);
+            return 0;
+        }
+
+        fs_munmap(s->snap_ram, s->snap_bytes);
+        if (s->snap_fd >= 0) close(s->snap_fd);
+        { char path[96]; fs_snap_path(idx, path); unlink(path); }
+
+        uint8_t vt = s->valueType; uint32_t pid = s->pid;
+        memset(s, 0, sizeof(*s));
+        s->in_use = 1; s->mode = TS_MODE_LIST;
+        s->buf = buf; s->buf_cap = bytes; s->count = records;
+        s->rec_size = rec_size; s->value_length = vlen;
+        s->pid = pid; s->valueType = vt;
+        s->has_first = has_first; s->first_fd = -1;
+        s->has_prev = has_prev; s->prev_fd = -1;
+        s->snap_fd = -1;
+        return 1;
+    }
+
     uint64_t prev_off  = 8 + vlen;
     uint64_t first_off = 8 + vlen + (has_prev ? vlen : 0);
     uint64_t rec_size  = 8 + vlen * (1 + (has_prev ? 1 : 0) + (has_first ? 1 : 0));
     uint64_t records = s->survivor_count;
-    if (records == 0 || rec_size == 0 || records * rec_size > TS_RESIDENT_CAP) return 0;
+    if (records == 0 || rec_size == 0 || records > TS_RESIDENT_CAP / rec_size) return 0;
 
     uint64_t bytes = records * rec_size;
     void *buf = fs_mmap_anon(bytes);
@@ -670,9 +1077,9 @@ static int fs_snapshot_materialize(unsigned char idx, struct turboscan_session *
 
     fs_munmap(s->snap_ram, s->snap_bytes);
     fs_munmap(s->bitmap,   s->bitmap_bytes);
-    if (s->snap_fd > 0) close(s->snap_fd);
-    if (s->first_fd > 0) close(s->first_fd);
-    if (s->prev_fd > 0) close(s->prev_fd);
+    if (s->snap_fd >= 0) close(s->snap_fd);
+    if (s->first_fd >= 0) close(s->first_fd);
+    if (s->prev_fd >= 0) close(s->prev_fd);
     if (s->seg) free(s->seg);
     { char path[96]; fs_snap_path(idx, path); unlink(path);
       if (has_first) { fs_first_path(idx, path); unlink(path); }
@@ -723,6 +1130,8 @@ static int turboscan_scan_pass_range(int fd,
                                              simd_off, (size_t)simd_max);
             for (size_t k = 0; k < nm; k++) {
                 uint32_t coff = simd_off[k];
+                if (!ts_float_policy_simple_value(sp->flags, sp->valueType,
+                                                  &src[coff])) continue;
                 if (sess) {
                     if ((sess->count + 1) * sess->rec_size > sess->buf_cap) {
                         if (aptr) scan_alias_release(actx);
@@ -748,8 +1157,9 @@ static int turboscan_scan_pass_range(int fd,
         } else {
             uint64_t limit = (to_read >= value_length) ? to_read - value_length : 0;
             for (uint64_t j = 0; j <= limit; j += step) {
-                if (proc_scan_compareValues(sp->compareType, sp->valueType, value_length,
-                                            pattern, &src[j], prev_for_between, mask)) {
+                if (turboscan_policy_compare(sp->flags, sp->compareType, sp->valueType,
+                                             value_length, 0, pattern, &src[j],
+                                             prev_for_between, mask)) {
                     if (sess) {
                         if ((sess->count + 1) * sess->rec_size > sess->buf_cap) {
                             if (aptr) scan_alias_release(actx);
@@ -972,7 +1382,8 @@ int proc_turboscan_caps_handle(int fd, struct cmd_packet *packet) {
     resp.engines     = TSE_SIMD_COMPARE | TSE_SERVER_RESIDENT | TSE_SNAPSHOT
                      | TSE_SNAPSHOT_SEGMENTS | TSE_SNAPSHOT_CONFIG | TSE_SNAPSHOT_FIRST
                      | TSE_SNAPSHOT_PREVIOUS | TSE_ALIASING | TSE_PARALLEL_COMPARE
-                     | TSE_RESCAN_ALIASING;
+                     | TSE_RESCAN_ALIASING | TSE_FLOAT_POLICY
+                     | TSE_COMPACT_SIMPLE_SNAPSHOT;
     resp.max_threads = TS_WORKER_THREADS;
     net_send_int32(fd, CMD_SUCCESS);
     net_send_all(fd, &resp, sizeof(resp));
@@ -1092,7 +1503,9 @@ int proc_turboscan_start_handle(int fd, struct cmd_packet *packet, unsigned char
     uint8_t *read_buf   = (uint8_t *)net_alloc_buffer(chunk_size);
     uint8_t *result_buf = (uint8_t *)net_alloc_buffer(0x40000);
 
-    int simd_ok = (sp->compareType == 0) && !is_arrbytes && (step == value_length) && pattern != NULL;
+    int float_type = ts_float_policy_is_float(sp->valueType);
+    int simd_ok = (sp->compareType == 0) && !is_arrbytes && (step == value_length)
+               && pattern != NULL && (!float_type || (sp->flags & TS_FLOAT_EXACT));
     uint32_t *simd_off = NULL;
     uint64_t  simd_max = 0;
     if (simd_ok) {
@@ -1382,14 +1795,15 @@ int proc_turboscan_count_handle(int fd, struct cmd_packet *packet, unsigned char
             if (s->value_length != value_length || !bl_buf) {
                 nc = s->survivor_count;
             } else {
-                nc = fs_snapshot_rescan(fd, s, cp->compareType, cp->valueType, value_length, turbo_cmp,
+                nc = fs_snapshot_rescan(fd, s, cp->compareType, cp->valueType, value_length,
+                                        turbo_cmp, cp->flags,
                                         pattern, mask, between_hi, includes_prev, mem_buf, bl_buf,
                                         rescan_actx);
 
                 uint64_t rsz = 8 + s->value_length * (1 + (s->has_prev ? 1 : 0) + (s->has_first ? 1 : 0));
                 if (nc > 0 && nc <= g_turboscan_materialize_max
-                    && nc * TS_MATERIALIZE_DENSITY <= s->slot_count
-                    && nc * rsz <= TS_RESIDENT_CAP) {
+                    && nc <= s->slot_count / TS_MATERIALIZE_DENSITY
+                    && rsz != 0 && nc <= TS_RESIDENT_CAP / rsz) {
                     fs_snapshot_materialize(client_idx, s);
                 }
             }
@@ -1444,11 +1858,10 @@ int proc_turboscan_count_handle(int fd, struct cmd_packet *packet, unsigned char
                 }
 
                 const uint8_t *mem_ptr = win_base + (addr - window_start);
-                int matched = turbo_cmp
-                    ? scan_point_compare(cp->compareType, cp->valueType,
-                                         mem_ptr, pattern, prev_ptr)
-                    : (int)proc_scan_compareValues(cp->compareType, cp->valueType, value_length,
-                                                   pattern, mem_ptr, prev_ptr, mask);
+                int matched = turboscan_policy_compare(cp->flags, cp->compareType,
+                                                       cp->valueType, value_length,
+                                                       turbo_cmp, pattern, mem_ptr,
+                                                       prev_ptr, mask);
                 if (matched) {
                     uint8_t *out = recs + new_count * rec_size;
 
@@ -1532,11 +1945,10 @@ int proc_turboscan_count_handle(int fd, struct cmd_packet *packet, unsigned char
 
             const uint8_t *mem_value_ptr = win_base + (addr - window_start);
 
-            int matched = turbo_cmp
-                ? scan_point_compare(cp->compareType, cp->valueType,
-                                     mem_value_ptr, pattern, prev_value_ptr)
-                : (int)proc_scan_compareValues(cp->compareType, cp->valueType, value_length,
-                                               pattern, mem_value_ptr, prev_value_ptr, mask);
+            int matched = turboscan_policy_compare(cp->flags, cp->compareType,
+                                                   cp->valueType, value_length,
+                                                   turbo_cmp, pattern, mem_value_ptr,
+                                                   prev_value_ptr, mask);
             if (matched) {
                 if (result_len > flush_thresh) {
                     *(uint64_t *)result_buf = result_len;
