@@ -14,7 +14,7 @@ citations. Nothing is summarized from external documentation.
 | Symbol              | Value                                | Source                     |
 |---------------------|--------------------------------------|----------------------------|
 | `PACKET_VERSION`    | `"1.3"`                              | protocol.h:12              |
-| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.3.0\01.0"`   | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
+| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.3.1<NUL>1.1"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
 | `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:14              |
 | `BROADCAST_MAGIC`   | `0xFFFFAAAA`                         | server.h:19                |
 
@@ -172,13 +172,14 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 #### `CMD_BRANDING = 0xBD000501`
 - **Request body:** none.
 - **Response:** `uint32_t length`, then `length` bytes: the human branding string
-  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.3.0"`), a single `NUL`, then a
-  **capability level** string (`"1.0"`), with no trailing NUL.
+  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.3.1"`), a single `NUL`, then a
+  **capability level** string (`"1.1"`), with no trailing NUL.
 - **Capability level:** C-string clients read up to the first `NUL` and see only
   the unchanged brand; capability-aware clients read past the `NUL` to get the
-  level and gate features on it (e.g. `0xBDAACC04` bulk write). Built from
-  `PACKET_BRANDING "\0" "1.0"` in `server.c` - the literals are split so `\0` is a
-  NUL byte, not the octal escape `\01`. Bump the level as new capabilities land.
+  level and gate features on it. Capability `1.0` introduced `0xBDAACC04` bulk
+  write; `1.1` guarantees content-verified process writes and truthful terminal
+  status. Built from `PACKET_BRANDING "\0" "1.1"` in `server.c` - the literals
+  are split so `\0` is a NUL byte, not an octal escape.
 
 #### `CMD_PLATFORM_ID = 0xBD000502`
 - **Request body:** none.
@@ -210,9 +211,13 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 
 #### `CMD_PROC_WRITE = 0xBDAA0003` (proc.c:399-432)
 - **Request body:** `struct cmd_proc_write_packet` (16 bytes).
-- **Trailing data:** `length` bytes to write.
-- **Response:** `CMD_SUCCESS`.
-- **Kernel path:** `sys_proc_rw(..., write=1)`.
+- **Exchange:** the server sends `CMD_SUCCESS` when ready, then receives exactly
+  `length` trailing bytes in 64 KiB chunks.
+- **Terminal response:** `CMD_SUCCESS` only when every chunk reports a full
+  transfer and an immediate `sys_proc_rw(..., write=0)` readback matches the
+  requested bytes exactly; otherwise `CMD_ERROR`.
+- **Kernel path:** syscall 108 rejects short reads/writes by comparing the
+  `proc_rwmem` residual-derived transfer count with the requested length.
 
 #### `0xBDAACC04` (`proc_write_multi_handle`)
 Bulk write - the write counterpart to `CMD_PROC_SCAN_GET` (bulk read). Collapses a
@@ -224,13 +229,15 @@ Dispatched raw (no name macro); **not** auth-gated (mirrors the single write).
 - **Trailing data:** after the server's first `CMD_SUCCESS`, the client streams
   `count` entries, each `{ uint64_t address; uint32_t length; <length> bytes }`
   concatenated. Per-entry `length` capped at `0x100000`; `count` at `0xFFFF`.
-- **Response:** `CMD_SUCCESS` (ack), the server applies each entry via
-  `sys_proc_rw(..., write=1)` in 64 KiB chunks, then - if `flags` bit 0 was set -
-  a `count`-byte status array (one byte per entry, `0` = ok, `1` = write failed),
-  then a trailing `CMD_SUCCESS`. **Two** status words, plus the optional array
-  between them.
+- **Response:** `CMD_SUCCESS` (ack), the server applies and independently
+  readback-verifies each entry in 64 KiB chunks, then - if `flags` bit 0 was set -
+  a `count`-byte status array: `0` = verified, `1` = invalid request,
+  `3` = content mismatch, `4` = syscall/readback failure. Any nonzero value is a
+  failure. The trailing status is `CMD_SUCCESS` when the requested status array
+  was delivered; without an array it is `CMD_ERROR` if any entry failed.
 - **Semantics:** best-effort and non-atomic - a failed entry does not stop the
-  rest. A `count`/`length` cap violation makes the server reply `CMD_ERROR` and
+  rest, and a multi-chunk entry can be partially written before a later chunk
+  fails. A `count`/`length` cap violation makes the server reply `CMD_ERROR` and
   abort the command. Status words are sent raw (`CMD_SUCCESS = 0x80000000`).
 
 #### `CMD_PROC_MAPS = 0xBDAA0004` (proc.c:434-477)
@@ -1066,11 +1073,10 @@ Documented here so a developer doesn't mistake them for bugs:
 
 ---
 
-*This document reflects the ps4debug-NG `v1.3.0` payload (`PS4DEBUG_NG_VERSION_STR`
+*This document reflects the ps4debug-NG `v1.3.1` payload (`PS4DEBUG_NG_VERSION_STR`
 in `version.h`, surfaced via `PACKET_BRANDING` at protocol.h:13). Last reconciled
-against the source tree on 2026-07-01, when the Turbo Scan family
-(`0xBDAACC10-0xBDAACC17`, incl. the CANCEL command) and FS/GS-base
-(`0xBDBB000E/0xBDBB000F`) were added (the v1.3.0 bump).
+against the source tree on 2026-07-28, when process writes gained exact transfer
+accounting, independent readback verification, and truthful single/multi status.
 Wire layouts (struct sizes/fields, opcodes, status codes, enums) are authoritative;
 per-command `file:line` citations are best-effort and can lag source edits - treat
 them as starting points, not exact anchors.*

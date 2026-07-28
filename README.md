@@ -53,11 +53,13 @@ to date has been on earlier firmware.)
 
 ### Process inspection and manipulation
 - **Enumerate processes** (`p_comm` + pid list).
-- **Read and write target memory** in 64 KiB streamed chunks.
+- **Read and content-verified write target memory** in 64 KiB streamed chunks.
+  Writes report success only after exact readback; short transfers, syscall
+  failures, and byte mismatches return failure.
 - **Bulk write / freeze** (`0xBDAACC04`) - apply many `{address, length, bytes}`
   writes in one exchange (the write counterpart to bulk-read), collapsing a
-  freeze / multi-poke loop into a single round-trip with an optional per-entry
-  status array. Raw-literal opcode.
+  freeze / multi-poke loop into a single round-trip with content-verified
+  per-entry status. Raw-literal opcode.
 - **List virtual memory maps (including missing sections improvements)** - ranges, protections, backing names.
 - **Query process metadata** - name, path, titleId, contentId.
 - **Identify the foreground app** (`0xBDDD0006`) - returns pid + titleid + contentid
@@ -323,8 +325,10 @@ the host `gcc` using freestanding flags targeting the PS4's AMD Jaguar CPU
 (`-march=btver2 -m64 -mabi=sysv -mcmodel=small -nostdlib -nostartfiles`).
 
 ```bash
-./build.sh           # incremental build
-./build.sh clean     # full clean + rebuild
+(cd debugger && make clean)
+(cd kdebugger && make clean)
+(cd installer && make clean)
+./build.sh
 ```
 
 Output: `ps4debug-ng.bin` at the repo root. Send this file to your PS4's
@@ -332,10 +336,18 @@ payload loader (usually `nc`-able on port 9020 or 9021 depending on your
 jailbreak flavour). Once loaded, the payload jailbreaks itself, installs the
 kernel module, and begins listening on port 744.
 
+The truthful-write harness has an offline framing check and a non-destructive
+live test that allocates and releases scratch memory in `SceShellCore`:
+
+```bash
+python3 tests/ps4_truthful_write_test.py --self-test
+python3 tests/ps4_truthful_write_test.py 192.168.1.118
+```
+
 You should see a system notification confirming the payload is alive:
 
 ```
-ps4debug-NG by OSR v1.3.0
+ps4debug-NG by OSR v1.3.1
 Special thanks to golden,
 Ctn, SiSTRo, DeathRGH
 & Pharaoh2k! ♥
