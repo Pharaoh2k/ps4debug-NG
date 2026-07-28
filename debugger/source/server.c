@@ -60,7 +60,7 @@ int cmd_handler(int fd, struct cmd_packet *packet, unsigned char client_idx) {
             return 0;
         case CMD_BRANDING: {
 
-            static const char brand[] = PACKET_BRANDING "\0" "1.0";
+            static const char brand[] = PACKET_BRANDING "\0" "1.1";
             len = (uint32_t)(sizeof(brand) - 1);
             net_send_all(fd, &len, sizeof(uint32_t));
             net_send_all(fd, brand, len);
@@ -93,7 +93,7 @@ int handle_client(struct server_client *svc) {
     struct cmd_packet packet;
     uint32_t rsize;
     uint32_t length;
-    void *data;
+    void *data = NULL;
     int fd;
     int r;
 
@@ -168,7 +168,7 @@ int handle_client(struct server_client *svc) {
             }
 
             r = net_recv_all(fd, data, length, 1);
-            if (!r) {
+            if (r != (int)length) {
                 goto error;
             }
 

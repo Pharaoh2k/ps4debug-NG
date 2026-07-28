@@ -445,6 +445,33 @@ int proc_read_stack_handle(int fd, struct cmd_packet *packet) {
     return 0;
 }
 
+static uint8_t proc_write_mem_status(uint32_t pid, uint64_t address,
+                                     uint32_t length, const void *expected,
+                                     void *readback) {
+    if ((int32_t)pid <= 0 || !expected || !readback || length == 0
+        || address + length < address) {
+        return PROC_WRITE_STATUS_INVALID;
+    }
+
+    if (sys_proc_rw(pid, address, (void *)expected, length, 1) != 0) {
+        return PROC_WRITE_STATUS_RW_FAILED;
+    }
+
+    const uint8_t *wanted = (const uint8_t *)expected;
+    uint8_t *actual = (uint8_t *)readback;
+    for (uint32_t i = 0; i < length; i++) {
+        actual[i] = wanted[i] ^ 0xFFu;
+    }
+
+    if (sys_proc_rw(pid, address, actual, length, 0) != 0) {
+        return PROC_WRITE_STATUS_RW_FAILED;
+    }
+
+    return memcmp(actual, wanted, length) == 0
+        ? PROC_WRITE_STATUS_OK
+        : PROC_WRITE_STATUS_VERIFY_FAILED;
+}
+
 int proc_write_handle(int fd, struct cmd_packet *packet) {
     struct cmd_proc_write_packet *wp = (struct cmd_proc_write_packet *)packet->data;
 
@@ -459,23 +486,58 @@ int proc_write_handle(int fd, struct cmd_packet *packet) {
         return 1;
     }
 
+    void *readback = net_alloc_buffer(0x10000);
+    if (!readback) {
+        free(data);
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+
     net_send_int32(fd, CMD_SUCCESS);
 
     uint64_t length = wp->length;
     uint64_t address = wp->address;
+    uint8_t status = PROC_WRITE_STATUS_OK;
+    int request_valid = length == 0
+        || ((int32_t)wp->pid > 0 && address + length >= address);
+    if (!request_valid) {
+        status = PROC_WRITE_STATUS_INVALID;
+    }
 
     if (length > 0) {
         while (length > 0x10000) {
-            net_recv_all(fd, data, 0x10000, 1);
-            sys_proc_rw(wp->pid, address, data, 0x10000, 1);
+            if (net_recv_all(fd, data, 0x10000, 1) != 0x10000) {
+                free(readback);
+                free(data);
+                return 1;
+            }
+            if (request_valid) {
+                uint8_t chunk_status = proc_write_mem_status(
+                    wp->pid, address, 0x10000, data, readback);
+                if (status == PROC_WRITE_STATUS_OK) {
+                    status = chunk_status;
+                }
+            }
             address += 0x10000;
             length -= 0x10000;
         }
-        net_recv_all(fd, data, (int)length, 1);
-        sys_proc_rw(wp->pid, address, data, length, 1);
+        if (net_recv_all(fd, data, (int)length, 1) != (int)length) {
+            free(readback);
+            free(data);
+            return 1;
+        }
+        if (request_valid) {
+            uint8_t chunk_status = proc_write_mem_status(
+                wp->pid, address, (uint32_t)length, data, readback);
+            if (status == PROC_WRITE_STATUS_OK) {
+                status = chunk_status;
+            }
+        }
     }
 
-    net_send_int32(fd, CMD_SUCCESS);
+    net_send_int32(fd, status == PROC_WRITE_STATUS_OK
+                       ? CMD_SUCCESS : CMD_ERROR);
+    free(readback);
     free(data);
     return 0;
 }
@@ -503,10 +565,19 @@ int proc_write_multi_handle(int fd, struct cmd_packet *packet) {
         return 1;
     }
 
+    unsigned char *readback =
+        (unsigned char *)net_alloc_buffer(0x10000);
+    if (!readback) {
+        free(buf);
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+
     unsigned char *status = NULL;
     if (want_status && count > 0) {
         status = (unsigned char *)net_alloc_buffer(count);
         if (!status) {
+            free(readback);
             free(buf);
             net_send_int32(fd, CMD_DATA_NULL);
             return 1;
@@ -515,11 +586,12 @@ int proc_write_multi_handle(int fd, struct cmd_packet *packet) {
 
     net_send_int32(fd, CMD_SUCCESS);
 
+    int any_failed = 0;
     for (uint32_t i = 0; i < count; i++) {
         unsigned char hdr[12];
-        if (net_recv_all(fd, hdr, 12, 1) < 0) {
-
+        if (net_recv_all(fd, hdr, 12, 1) != 12) {
             if (status) free(status);
+            free(readback);
             free(buf);
             return 1;
         }
@@ -529,8 +601,8 @@ int proc_write_multi_handle(int fd, struct cmd_packet *packet) {
         memcpy(&len32, hdr + 8, 4);
 
         if (len32 > PROC_WRITE_MULTI_MAX_ENTRY) {
-
             if (status) free(status);
+            free(readback);
             free(buf);
             net_send_int32(fd, CMD_ERROR);
             return 1;
@@ -538,18 +610,30 @@ int proc_write_multi_handle(int fd, struct cmd_packet *packet) {
 
         uint64_t length = len32;
         uint64_t a      = addr;
-        unsigned char failed = 0;
+        int entry_valid = length == 0
+            || ((int32_t)pid > 0 && a + length >= a);
+        uint8_t failed = entry_valid
+            ? PROC_WRITE_STATUS_OK : PROC_WRITE_STATUS_INVALID;
         while (length > 0) {
             uint32_t toRecv = length > 0x10000u ? 0x10000u : (uint32_t)length;
-            if (net_recv_all(fd, buf, (int)toRecv, 1) < 0) {
+            if (net_recv_all(fd, buf, (int)toRecv, 1) != (int)toRecv) {
                 if (status) free(status);
+                free(readback);
                 free(buf);
                 return 1;
             }
-            if (sys_proc_rw(pid, a, buf, toRecv, 1) != 0)
-                failed = 1;
+            if (entry_valid) {
+                uint8_t chunk_status =
+                    proc_write_mem_status(pid, a, toRecv, buf, readback);
+                if (failed == PROC_WRITE_STATUS_OK) {
+                    failed = chunk_status;
+                }
+            }
             a      += toRecv;
             length -= toRecv;
+        }
+        if (failed != PROC_WRITE_STATUS_OK) {
+            any_failed = 1;
         }
         if (status) status[i] = failed;
     }
@@ -558,7 +642,9 @@ int proc_write_multi_handle(int fd, struct cmd_packet *packet) {
         net_send_all(fd, status, (int)count);
         free(status);
     }
-    net_send_int32(fd, CMD_SUCCESS);
+    net_send_int32(fd, !want_status && any_failed
+                       ? CMD_ERROR : CMD_SUCCESS);
+    free(readback);
     free(buf);
     return 0;
 }

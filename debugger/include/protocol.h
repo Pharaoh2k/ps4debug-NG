@@ -181,6 +181,11 @@ struct cmd_proc_write_multi_packet {
 #define PROC_WRITE_MULTI_MAX_COUNT  0xFFFFu
 #define PROC_WRITE_MULTI_MAX_ENTRY  0x100000u
 
+#define PROC_WRITE_STATUS_OK             0u
+#define PROC_WRITE_STATUS_INVALID        1u
+#define PROC_WRITE_STATUS_VERIFY_FAILED  3u
+#define PROC_WRITE_STATUS_RW_FAILED      4u
+
 struct cmd_proc_maps_packet {
     uint32_t pid;
 } __attribute__((packed));

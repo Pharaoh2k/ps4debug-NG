@@ -6,7 +6,8 @@ int net_select(int fd, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, str
     return syscall(93, fd, readfds, writefds, exceptfds, timeout);
 }
 
-int net_send_all(int fd, void *data, int length) {
+int net_send_all(int fd, const void *data, int length) {
+    const unsigned char *bytes = (const unsigned char *)data;
     int left = length;
     int offset = 0;
     int sent = 0;
@@ -15,9 +16,9 @@ int net_send_all(int fd, void *data, int length) {
 
     while (left > 0) {
         if (left > 0x10000) {
-            sent = write(fd, data + offset, 0x10000);
+            sent = write(fd, bytes + offset, 0x10000);
         } else {
-            sent = write(fd, data + offset, left);
+            sent = write(fd, bytes + offset, left);
         }
 
         if (sent <= 0) {
@@ -47,18 +48,18 @@ int net_recv_all(int fd, void *data, int length, int force) {
             recv = read(fd, data + offset, left);
         }
 
-        if (recv <= 0) {
-            if (force) {
-                if(errno && errno != EWOULDBLOCK) {
-                    return recv;
-                }
-            } else {
-                return offset;
-            }
-        } else {
-            offset += recv;
-            left -= recv;
+        if (recv == 0) {
+            return offset;
         }
+        if (recv < 0) {
+            if (force && errno == EWOULDBLOCK) {
+                continue;
+            }
+            return recv;
+        }
+
+        offset += recv;
+        left -= recv;
     }
 
     return offset;

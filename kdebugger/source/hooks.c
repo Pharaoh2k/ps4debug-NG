@@ -55,13 +55,19 @@ finish:
 
 int sys_proc_rw(struct thread *td, struct sys_proc_rw_args *uap) {
     struct proc *p;
+    uint64_t transferred;
     int r;
 
     r = 1;
+    transferred = 0;
 
     p = proc_find_by_pid(uap->pid);
     if(p) {
-        r = proc_rw_mem(p, (void *)uap->address, uap->length, uap->data, 0, uap->write);
+        r = proc_rw_mem(p, (void *)uap->address, uap->length,
+                        uap->data, &transferred, uap->write);
+        if (!r && transferred != uap->length) {
+            r = 1;
+        }
     }
 
     td->td_retval[0] = r;

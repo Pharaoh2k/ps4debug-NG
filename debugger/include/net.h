@@ -32,7 +32,7 @@ typedef struct {
 
 int net_select(int fd, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
 
-int net_send_all(int fd, void *data, int length);
+int net_send_all(int fd, const void *data, int length);
 int net_recv_all(int fd, void *data, int length, int force);
 int net_send_int32(int fd, uint32_t status);
 
