@@ -16,3 +16,8 @@ build/
 Thumbs.db
 *.swp
 *~
+
+# Local dev tooling and Python cache (not part of the public release)
+_tools/
+__pycache__/
+*.pyc
