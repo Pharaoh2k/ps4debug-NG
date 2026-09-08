@@ -3,6 +3,7 @@
 #include "console.h"
 #include "debug.h"
 #include "kdbg.h"
+#include "../../syscalls.h"
 
 int console_print_handle(int fd, struct cmd_packet *packet) {
     uint32_t *lenp;
@@ -24,7 +25,7 @@ int console_print_handle(int fd, struct cmd_packet *packet) {
 
     memset(data, NULL, length);
     net_recv_all(fd, data, length, 1);
-    syscall(112, 2, data);
+    syscall(PS4DEBUG_SYS_CONSOLE_CMD, 2, data);
     net_send_int32(fd, CMD_SUCCESS);
     free(data);
     return 0;
@@ -196,7 +197,7 @@ int console_reboot_handle(int fd, struct cmd_packet *packet) {
         debug_cleanup(curdbgctx);
         sceNetSocketClose(fd);
     }
-    syscall(112, 1, 0);
+    syscall(PS4DEBUG_SYS_CONSOLE_CMD, 1, 0);
 
     return 1;
 }

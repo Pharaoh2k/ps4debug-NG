@@ -105,6 +105,19 @@ to date has been on earlier firmware.)
 - **Write** arbitrary kernel memory - the server toggles `CR0.WP` around the
   write for you.
 
+**Custom syscall slots (PS4-HEN / GoldHEN coexistence).** The kdebugger installs
+its six syscalls at **257-262** (`syscalls.h`), not at the traditional ps4debug
+107-112 block. PS4-HEN and GoldHEN install their own `sys_proc_list` /
+`sys_proc_rw` / `sys_proc_cmd` at 107 / 108 / 109 whenever `enable_plugins` is
+set (their default), and `install_syscall()` overwrites the `sysent` entry
+outright - so whichever payload loaded last silently owned those slots. Because
+HEN's `sys_proc_cmd` implements only `SYS_PROC_VM_MAP`, a HEN payload installing
+after ours left read/write working while allocation, RPC, ELF injection and
+thread info all failed. Moving our block removes that ordering hazard entirely
+and leaves HEN's plugin syscalls untouched. 257-262 were verified `nosys` on the
+decrypted kernels of **all** supported firmwares (229 slots are free on every
+one of them); re-check against a new firmware's `sysent` table before adding it.
+
 ### Built-in Zydis disassembler
 Large memory regions never leave the PS4. Three server-side decoder commands
 keep bandwidth low:

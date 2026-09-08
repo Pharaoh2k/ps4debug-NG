@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#ifndef PS4DEBUG_NG_SYSCALLS_H
+#define PS4DEBUG_NG_SYSCALLS_H
+
+#define PS4DEBUG_SYS_PROC_LIST    257
+#define PS4DEBUG_SYS_PROC_RW      258
+#define PS4DEBUG_SYS_PROC_CMD     259
+#define PS4DEBUG_SYS_KERN_BASE    260
+#define PS4DEBUG_SYS_KERN_RW      261
+#define PS4DEBUG_SYS_CONSOLE_CMD  262
+
+#endif

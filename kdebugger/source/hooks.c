@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "hooks.h"
+#include "../../syscalls.h"
 
 inline void write_jmp(uint64_t address, uint64_t destination) {
 
@@ -476,14 +477,14 @@ void install_syscall(uint32_t n, void *func) {
 int install_hooks() {
     cpu_disable_wp();
 
-    install_syscall(107, sys_proc_list);
-    install_syscall(108, sys_proc_rw);
-    install_syscall(109, sys_proc_cmd);
+    install_syscall(PS4DEBUG_SYS_PROC_LIST, sys_proc_list);
+    install_syscall(PS4DEBUG_SYS_PROC_RW, sys_proc_rw);
+    install_syscall(PS4DEBUG_SYS_PROC_CMD, sys_proc_cmd);
 
-    install_syscall(110, sys_kern_base);
-    install_syscall(111, sys_kern_rw);
+    install_syscall(PS4DEBUG_SYS_KERN_BASE, sys_kern_base);
+    install_syscall(PS4DEBUG_SYS_KERN_RW, sys_kern_rw);
 
-    install_syscall(112, sys_console_cmd);
+    install_syscall(PS4DEBUG_SYS_CONSOLE_CMD, sys_console_cmd);
 
     cpu_enable_wp();
 

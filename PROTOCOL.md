@@ -216,7 +216,7 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 - **Terminal response:** `CMD_SUCCESS` only when every chunk reports a full
   transfer and an immediate `sys_proc_rw(..., write=0)` readback matches the
   requested bytes exactly; otherwise `CMD_ERROR`.
-- **Kernel path:** syscall 108 rejects short reads/writes by comparing the
+- **Kernel path:** the `sys_proc_rw` syscall (258, see `syscalls.h`) rejects short reads/writes by comparing the
   `proc_rwmem` residual-derived transfer count with the requested length.
 
 #### `0xBDAACC04` (`proc_write_multi_handle`)
@@ -691,7 +691,7 @@ pattern (like `CMD_DEBUG_SETREGS`).
 
 #### `CMD_CONSOLE_REBOOT = 0xBDDD0001` (debug.c:110-118)
 - **Request body:** none.
-- **Response:** none - connection is closed; system reboots via `syscall(112, 1, 0)`.
+- **Response:** none - connection is closed; system reboots via `syscall(PS4DEBUG_SYS_CONSOLE_CMD, 1, 0)` (262, see `syscalls.h`).
 
 #### `CMD_CONSOLE_END = 0xBDDD0002` (debug.c:133-136)
 - **Request body:** none.
