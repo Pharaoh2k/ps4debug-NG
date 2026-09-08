@@ -630,6 +630,37 @@ void init_1350sdk(uint8_t *kbase) {
     sysents = (void *)(kbase + 0x1102B70);
 }
 
+void init_1352sdk(uint8_t *kbase) {
+    Xfast_syscall = (void *)(kbase + 0x1C0);
+    printf = (void *)(kbase + 0x2E0510);
+    malloc = (void *)(kbase + 0x9520);
+    free = (void *)(kbase + 0x96E0);
+    memcpy = (void *)(kbase + 0x2BD5A0);
+    memset = (void *)(kbase + 0x1FA260);
+    memcmp = (void *)(kbase + 0x394AD0);
+    kmem_alloc = (void *)(kbase + 0x466290);
+    strlen = (void *)(kbase + 0x36B2F0);
+    create_thread = (void *)(kbase + 0x4C6C0);
+    kern_reboot = (void *)(kbase + 0x3A25A0);
+    vm_map_lock_read = (void *)(kbase + 0x2F7870);
+    vm_map_lookup_entry = (void *)(kbase + 0x2F7EB0);
+    vm_map_unlock_read = (void *)(kbase + 0x2F78C0);
+    vm_map_delete = (void *)(kbase + 0x2FA370);
+    vm_map_protect = (void *)(kbase + 0x2FC6D0);
+    vm_map_findspace = (void *)(kbase + 0x2FA930);
+    vm_map_insert = (void *)(kbase + 0x2F8A70);
+    vm_map_lock = (void *)(kbase + 0x2F7720);
+    vm_map_unlock = (void *)(kbase + 0x2F7790);
+    proc_rwmem = (void *)(kbase + 0x366760);
+    disable_console_output = (void *)(kbase + 0x1A47F40);
+    M_TEMP = (void *)(kbase + 0x1520D00);
+    kernel_map = (void *)(kbase + 0x22D1D50);
+    prison0 = (void *)(kbase + 0x111FA18);
+    rootvnode = (void *)(kbase + 0x2136E90);
+    allproc = (void *)(kbase + 0x1B28538);
+    sysents = (void *)(kbase + 0x1102B70);
+}
+
 void init_ksdk() {
     uint64_t kbase = get_kbase();
     cachedKernelBase = kbase;
@@ -691,6 +722,9 @@ void init_ksdk() {
             break;
         case 1350:
             init_1350sdk((uint8_t *)kbase);
+            break;
+        case 1352:
+            init_1352sdk((uint8_t *)kbase);
             break;
     }
 }

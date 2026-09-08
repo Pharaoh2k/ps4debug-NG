@@ -744,6 +744,43 @@ static void patch_1350_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2A4C1A), "\x90\x90\x90\x90\x90", 5);
 }
 
+static void patch_1352_v119(uint64_t kernbase) {
+
+    *(uint8_t *)(kernbase + 0x2BD5AD) = 0xEB;
+
+    memcpy((void *)(kernbase + 0x3B3580), "\x48\xC7\xC0\x01\x00\x00\x00\xC3", 8);
+
+    memcpy((void *)(kernbase + 0x3B35F0), "\x48\xC7\xC0\x01\x00\x00\x00\xC3", 8);
+
+    memcpy((void *)(kernbase + 0x3B3610), "\x48\xC7\xC0\x01\x00\x00\x00\xC3", 8);
+
+    *(uint8_t *)(kernbase + 0x76C270) = 0xC3;
+
+    memcpy((void *)(kernbase + 0x1FC561), "\x31\xC0\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2FC8AC), "\x90\x90\x90\x90\x90\x90", 6);
+
+    *(uint8_t *)(kernbase + 0x367145) = 0xEB;
+
+    memcpy((void *)(kernbase + 0x367631), "\xE9\x7C\x02\x00\x00", 5);
+
+    *(uint16_t *)(kernbase + 0x478504) = 0x9090;
+
+    *(uint8_t *)(kernbase + 0x46635C) = 0x07;
+
+    *(uint8_t *)(kernbase + 0x466364) = 0x07;
+
+    memcpy((void *)(kernbase + 0x2BD7E7), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x2BD6F2), "\x90\x90", 2);
+
+    memcpy((void *)(kernbase + 0x30430E), "\x90\x90\x90\x90\x90\x90", 6);
+
+    memcpy((void *)(kernbase + 0x1357E5), "\x90\x90\x90\x90\x90", 5);
+
+    memcpy((void *)(kernbase + 0x2A4CBA), "\x90\x90\x90\x90\x90", 5);
+}
+
 void patch_kernel() {
     uint64_t kernbase = get_kbase();
 
@@ -810,6 +847,9 @@ void patch_kernel() {
             break;
         case 1350:
             patch_1350_v119(kernbase);
+            break;
+        case 1352:
+            patch_1352_v119(kernbase);
             break;
         default:
             printf("[ps4debug-ng] unsupported firmware %u - kernel not patched\n",

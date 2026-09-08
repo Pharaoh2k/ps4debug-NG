@@ -18,7 +18,7 @@ Note: A mirror of this repo is available on: https://git.slowb.ro/OpenSourcereR/
 
 ## Supported firmwares
 
-36 firmware versions across the 5.05-13.50 range. Each has a dedicated kernel
+37 firmware versions across the 5.05-13.52 range. Each has a dedicated kernel
 patch routine in [installer/source/installer.c](installer/source/installer.c);
 booting on an unsupported FW prints `unsupported firmware <N> - kernel not
 patched` to the kernel log and aborts cleanly.
@@ -33,12 +33,12 @@ patched` to the kernel log and aborts cleanly.
 | 10.xx | 10.00, 10.01, 10.50, 10.70, 10.71           |
 | 11.xx | 11.00, 11.02, 11.50, 11.52                  |
 | 12.xx | 12.00, 12.02, 12.50, 12.52                  |
-| 13.xx | 13.00, 13.02, 13.04, 13.50                  |
+| 13.xx | 13.00, 13.02, 13.04, 13.50, 13.52           |
 
 Clients can read the running FW with `CMD_FW_VERSION` (returns a `uint16_t` in
 `major*100 + minor` form - e.g. `0x1F4 = 500 = 5.00`).
 
-**13.x support:** 13.00 / 13.02 / 13.04 / 13.50 run the full command set, including
+**13.x support:** 13.00 / 13.02 / 13.04 / 13.50 / 13.52 run the full command set, including
 the commands that spawn a worker thread in the target process (`CMD_PROC_INTALL`,
 `CMD_PROC_CALL`, `CMD_PROC_ELF`, `CMD_PROC_ELF_RPC`) - the libkernel.sprx symbol
 offsets (`scePthreadAttrInit`, `scePthreadAttrSetstacksize`, `scePthreadCreate`,
