@@ -682,7 +682,7 @@ int proc_relocate_elf(struct proc *p, void *elf, void *exec) {
     for (int i = 0; i < ehdr->e_shnum; i++) {
         struct Elf64_Shdr *shdr = elf_section(ehdr, i);
 
-        if (shdr->sh_type == SHT_REL) {
+        if (shdr->sh_type == SHT_RELA) {
 
             for (int j = 0; j < shdr->sh_size / shdr->sh_entsize; j++) {
                 struct Elf64_Rela *reltab = &((struct Elf64_Rela *)((uint64_t)ehdr + shdr->sh_offset))[j];
