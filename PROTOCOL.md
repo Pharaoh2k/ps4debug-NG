@@ -154,8 +154,8 @@ the newer additions (bulk write `0xBDAACC04`, Turbo Scan `0xBDAACC10-0xBDAACC17`
 assemble `0xBDAA0024`, FS/GS-base `0xBDBB000E/0xBDBB000F`, foreground-app
 `0xBDDD0006`) are dispatched as **raw hex literals** with no macro, because some
 clients enumerate the published `CMD_*` set and depend on its count (see
-`protocol.h:305-311`). Three dev-only diagnostics (`0xBDAACC30/31/32`) exist in
-development builds but are **stripped from release payloads** and are not listed here.
+`protocol.h:305-311`). Three dev-only diagnostics (`0xBDAACC30/31/32`) were used
+during bring-up; they are **not part of the release source** and are not listed here.
 
 ### 2.1 Info & ping (`0xBD000xxx`, `0xBDAACC06`)
 

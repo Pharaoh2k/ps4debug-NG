@@ -54,8 +54,6 @@ int proc_turboscan_config_handle(int fd, struct cmd_packet *packet);
 int proc_turboscan_regions_handle(int fd, struct cmd_packet *packet);
 int proc_turboscan_cancel_handle(int fd, struct cmd_packet *packet);
 
-int proc_turboscan_fileprobe_handle(int fd, struct cmd_packet *packet);
-
 void turboscan_session_free_idx(unsigned char idx);
 void turboscan_alias_free_idx(unsigned char idx);
 
