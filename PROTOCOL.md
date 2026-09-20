@@ -14,7 +14,7 @@ citations. Nothing is summarized from external documentation.
 | Symbol              | Value                                | Source                     |
 |---------------------|--------------------------------------|----------------------------|
 | `PACKET_VERSION`    | `"1.3"`                              | protocol.h:12              |
-| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.3.1<NUL>1.1"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
+| `PACKET_BRANDING`   | `"ps4debug-NG by OSR v1.3.2<NUL>1.1"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
 | `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:14              |
 | `BROADCAST_MAGIC`   | `0xFFFFAAAA`                         | server.h:19                |
 
@@ -172,7 +172,7 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 #### `CMD_BRANDING = 0xBD000501`
 - **Request body:** none.
 - **Response:** `uint32_t length`, then `length` bytes: the human branding string
-  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.3.1"`), a single `NUL`, then a
+  (`PACKET_BRANDING`, e.g. `"ps4debug-NG by OSR v1.3.2"`), a single `NUL`, then a
   **capability level** string (`"1.1"`), with no trailing NUL.
 - **Capability level:** C-string clients read up to the first `NUL` and see only
   the unchanged brand; capability-aware clients read past the `NUL` to get the
@@ -1073,10 +1073,11 @@ Documented here so a developer doesn't mistake them for bugs:
 
 ---
 
-*This document reflects the ps4debug-NG `v1.3.1` payload (`PS4DEBUG_NG_VERSION_STR`
+*This document reflects the ps4debug-NG `v1.3.2` payload (`PS4DEBUG_NG_VERSION_STR`
 in `version.h`, surfaced via `PACKET_BRANDING` at protocol.h:13). Last reconciled
-against the source tree on 2026-07-28, when process writes gained exact transfer
-accounting, independent readback verification, and truthful single/multi status.
+against the source tree on 2026-09-20, when firmware 13.52 was added, the six
+custom syscalls moved to 257-262 to coexist with PS4-HEN, and the dev-only
+diagnostics were removed.
 Wire layouts (struct sizes/fields, opcodes, status codes, enums) are authoritative;
 per-command `file:line` citations are best-effort and can lag source edits - treat
 them as starting points, not exact anchors.*

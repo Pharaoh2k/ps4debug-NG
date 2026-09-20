@@ -349,18 +349,10 @@ payload loader (usually `nc`-able on port 9020 or 9021 depending on your
 jailbreak flavour). Once loaded, the payload jailbreaks itself, installs the
 kernel module, and begins listening on port 744.
 
-The truthful-write harness has an offline framing check and a non-destructive
-live test that allocates and releases scratch memory in `SceShellCore`:
-
-```bash
-python3 tests/ps4_truthful_write_test.py --self-test
-python3 tests/ps4_truthful_write_test.py 192.168.1.118
-```
-
 You should see a system notification confirming the payload is alive:
 
 ```
-ps4debug-NG by OSR v1.3.1
+ps4debug-NG by OSR v1.3.2
 Special thanks to golden,
 Ctn, SiSTRo, DeathRGH
 & Pharaoh2k! ♥
