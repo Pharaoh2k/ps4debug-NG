@@ -12,7 +12,7 @@ wire-compatible with existing clients. It is licensed under GPL-3.
 firmware supported by Ctn's v1.1.19 is implemented here - existing clients
 should work without modification.
 
-Note: A mirror of this repo is available on: https://git.slowb.ro/OpenSourcereR/ps4debug-NG
+Official Discord server: [Team Reaper](https://discord.gg/7bjtgZf4PY)
 
 ---
 
