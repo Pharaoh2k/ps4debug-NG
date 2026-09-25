@@ -14,7 +14,7 @@ should work without modification.
 
 ## Official Discord Server: [Team Reaper](https://discord.gg/7bjtgZf4PY)
 
-## Official PlayStation 5 version [ps4debug-NG](https://github.com/Pharaoh2k/ps5debug-NG)
+## Official PlayStation 5 version [ps5debug-NG](https://github.com/Pharaoh2k/ps5debug-NG)
 
 ---
 
