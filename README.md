@@ -12,7 +12,9 @@ wire-compatible with existing clients. It is licensed under GPL-3.
 firmware supported by Ctn's v1.1.19 is implemented here - existing clients
 should work without modification.
 
-Official Discord server: [Team Reaper](https://discord.gg/7bjtgZf4PY)
+## Official Discord Server: [Team Reaper](https://discord.gg/7bjtgZf4PY)
+
+## Official PlayStation 5 version [ps4debug-NG](https://github.com/Pharaoh2k/ps5debug-NG)
 
 ---
 
