@@ -4,7 +4,9 @@
 #include "hooks.h"
 
 int _main(void) {
-    init_ksdk();
+    if (init_ksdk()) {
+        return 1;
+    }
 
     printf("[ps4debug-ng] kernel base 0x%llX\n", get_kbase());
 

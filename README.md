@@ -20,10 +20,9 @@ should work without modification.
 
 ## Supported firmwares
 
-37 firmware versions across the 5.05-13.52 range. Each has a dedicated kernel
-patch routine in [installer/source/installer.c](installer/source/installer.c);
-booting on an unsupported FW prints `unsupported firmware <N> - kernel not
-patched` to the kernel log and aborts cleanly.
+38 firmware versions across the 5.05-14.00 range. Each has a dedicated kernel
+patch routine. Unsupported firmware is rejected before kernel patching or
+debugger installation.
 
 | Major | Versions                                    |
 |-------|---------------------------------------------|
@@ -36,6 +35,7 @@ patched` to the kernel log and aborts cleanly.
 | 11.xx | 11.00, 11.02, 11.50, 11.52                  |
 | 12.xx | 12.00, 12.02, 12.50, 12.52                  |
 | 13.xx | 13.00, 13.02, 13.04, 13.50, 13.52           |
+| 14.xx | 14.00                                       |
 
 Clients can read the running FW with `CMD_FW_VERSION` (returns a `uint16_t` in
 `major*100 + minor` form - e.g. `0x1F4 = 500 = 5.00`).
@@ -48,6 +48,17 @@ offsets (`scePthreadAttrInit`, `scePthreadAttrSetstacksize`, `scePthreadCreate`,
 switch in [kdebugger/source/proc.c](kdebugger/source/proc.c). (13.x firmware
 offsets/patches were validated against decrypted kernels; on-hardware validation
 to date has been on earlier firmware.)
+
+**14.00 support:** kernel symbols, all 17 installer patches, and the three
+libkernel variants were independently checked against decrypted retail binaries,
+with comparisons to both 13.50 and 13.52. The web variant has new pthread entry
+points; the ordinary and system variants keep their 13.52 offsets. The four
+VM-map lock calls use adapters supplying the kernel's file/line arguments.
+
+The 14.00 installer verifies all patch windows before writing, accepts original
+code or this payload's exact replacements, and rejects unexpected bytes or
+occupied syscall slots 257-262. It restores the incoming CR0 value after patching.
+Other payloads that modify these windows differently may be rejected.
 
 ---
 
@@ -354,7 +365,7 @@ kernel module, and begins listening on port 744.
 You should see a system notification confirming the payload is alive:
 
 ```
-ps4debug-NG by OSR v1.3.2
+ps4debug-NG by OSR v1.3.3
 Special thanks to golden,
 Ctn, SiSTRo, DeathRGH
 & Pharaoh2k! ♥

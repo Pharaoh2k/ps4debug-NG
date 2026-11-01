@@ -46,6 +46,7 @@ extern void **allproc;
 extern struct sysent *sysents;
 
 extern uint64_t get_kbase();
-extern void init_ksdk();
+/* Returns nonzero for an unsupported firmware or a signature mismatch. */
+extern int init_ksdk(void);
 
 #endif

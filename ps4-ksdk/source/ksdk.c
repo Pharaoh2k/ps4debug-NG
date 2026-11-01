@@ -661,7 +661,102 @@ void init_1352sdk(uint8_t *kbase) {
     sysents = (void *)(kbase + 0x1102B70);
 }
 
-void init_ksdk() {
+/* The 14.00 _vm_map_* lock entry points also take file/line arguments.
+ * Keep the public SDK interface while supplying those diagnostic arguments. */
+static void vm_map_lock_read_1400(struct vm_map *map) {
+    void (*lock_fn)(struct vm_map *, const char *, int) =
+        (void *)(cachedKernelBase + 0x2F7B20);
+    lock_fn(map, "ps4debug-NG", 0);
+}
+
+static void vm_map_unlock_read_1400(struct vm_map *map) {
+    void (*lock_fn)(struct vm_map *, const char *, int) =
+        (void *)(cachedKernelBase + 0x2F7B70);
+    lock_fn(map, "ps4debug-NG", 0);
+}
+
+static void vm_map_lock_1400(struct vm_map *map) {
+    void (*lock_fn)(struct vm_map *, const char *, int) =
+        (void *)(cachedKernelBase + 0x2F79D0);
+    lock_fn(map, "ps4debug-NG", 0);
+}
+
+static void vm_map_unlock_1400(struct vm_map *map) {
+    void (*lock_fn)(struct vm_map *, const char *, int) =
+        (void *)(cachedKernelBase + 0x2F7A40);
+    lock_fn(map, "ps4debug-NG", 0);
+}
+
+static int init_1400sdk(uint8_t *kbase) {
+    /* Checked directly against the retail 14.00 ELF. Reject unexpected code
+     * before assigning or calling any firmware-specific kernel functions. */
+    static const struct {
+        uint32_t offset;
+        uint8_t bytes[8];
+    } guards[] = {
+        { 0x1C0, { 0x0F, 0x01, 0xF8, 0x65, 0x48, 0x89, 0x24, 0x25 } }, /* Xfast_syscall */
+        { 0x2E07C0, { 0x55, 0x48, 0x89, 0xE5, 0x53, 0x48, 0x83, 0xEC } }, /* printf */
+        { 0x9520, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* malloc */
+        { 0x96E0, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* free */
+        { 0x2BD850, { 0x55, 0x48, 0x89, 0xE5, 0x49, 0x89, 0xFA, 0x49 } }, /* memcpy */
+        { 0x1FA500, { 0x55, 0x48, 0x89, 0xE5, 0x53, 0x50, 0x48, 0x89 } }, /* memset */
+        { 0x394D80, { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x85, 0xD2, 0x74 } }, /* memcmp */
+        { 0x466540, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* kmem_alloc */
+        { 0x36B5A0, { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x8D, 0x47, 0xFF } }, /* strlen */
+        { 0x4C6C0, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* create_thread */
+        { 0x3A2850, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* kern_reboot */
+        { 0x2F7B20, { 0x55, 0x48, 0x89, 0xE5, 0x80, 0xBF, 0x1A, 0x01 } }, /* vm_map_lock_read */
+        { 0x2F8160, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* vm_map_lookup_entry */
+        { 0x2F7B70, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x80 } }, /* vm_map_unlock_read */
+        { 0x2FA620, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* vm_map_delete */
+        { 0x2FC980, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* vm_map_protect */
+        { 0x2FABE0, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* vm_map_findspace */
+        { 0x2F8D20, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* vm_map_insert */
+        { 0x2F79D0, { 0x55, 0x48, 0x89, 0xE5, 0x53, 0x50, 0x80, 0xBF } }, /* vm_map_lock */
+        { 0x2F7A40, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x80 } }, /* vm_map_unlock */
+        { 0x366A10, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56 } }, /* proc_rwmem */
+    };
+    for (uint64_t i = 0; i < sizeof(guards) / sizeof(guards[0]); ++i) {
+        const volatile uint8_t *code = kbase + guards[i].offset;
+        for (uint64_t j = 0; j < sizeof(guards[i].bytes); ++j) {
+            if (code[j] != guards[i].bytes[j]) {
+                return 1;
+            }
+        }
+    }
+
+    Xfast_syscall = (void *)(kbase + 0x1C0);
+    printf = (void *)(kbase + 0x2E07C0);
+    malloc = (void *)(kbase + 0x9520);
+    free = (void *)(kbase + 0x96E0);
+    memcpy = (void *)(kbase + 0x2BD850);
+    memset = (void *)(kbase + 0x1FA500);
+    memcmp = (void *)(kbase + 0x394D80);
+    kmem_alloc = (void *)(kbase + 0x466540);
+    strlen = (void *)(kbase + 0x36B5A0);
+    create_thread = (void *)(kbase + 0x4C6C0);
+    kern_reboot = (void *)(kbase + 0x3A2850);
+    vm_map_lock_read = vm_map_lock_read_1400;
+    vm_map_lookup_entry = (void *)(kbase + 0x2F8160);
+    vm_map_unlock_read = vm_map_unlock_read_1400;
+    vm_map_delete = (void *)(kbase + 0x2FA620);
+    vm_map_protect = (void *)(kbase + 0x2FC980);
+    vm_map_findspace = (void *)(kbase + 0x2FABE0);
+    vm_map_insert = (void *)(kbase + 0x2F8D20);
+    vm_map_lock = vm_map_lock_1400;
+    vm_map_unlock = vm_map_unlock_1400;
+    proc_rwmem = (void *)(kbase + 0x366A10);
+    disable_console_output = (void *)(kbase + 0x1A47F90);
+    M_TEMP = (void *)(kbase + 0x1520D00);
+    kernel_map = (void *)(kbase + 0x22D1D50);
+    prison0 = (void *)(kbase + 0x111FA18);
+    rootvnode = (void *)(kbase + 0x2136E90);
+    allproc = (void *)(kbase + 0x1B28538);
+    sysents = (void *)(kbase + 0x1102B70);
+    return 0;
+}
+
+int init_ksdk(void) {
     uint64_t kbase = get_kbase();
     cachedKernelBase = kbase;
     unsigned short firmwareVersion = kget_firmware_from_base(kbase);
@@ -726,5 +821,10 @@ void init_ksdk() {
         case 1352:
             init_1352sdk((uint8_t *)kbase);
             break;
+        case 1400:
+            return init_1400sdk((uint8_t *)kbase);
+        default:
+            return 1;
     }
+    return 0;
 }

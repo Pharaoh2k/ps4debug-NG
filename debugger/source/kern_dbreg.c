@@ -47,6 +47,7 @@ static uint64_t allproc_offset(void) {
     case 1300:                                  return 0x1B28538;
     case 1302: case 1304:                       return 0x1B28538;
     case 1350: case 1352:                       return 0x1B28538;
+    case 1400:                                  return 0x1B28538;
     default:                                    return 0;
     }
 }

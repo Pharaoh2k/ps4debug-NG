@@ -2,6 +2,7 @@
 
 #include "installer.h"
 #include "../../version.h"
+#include "../../syscalls.h"
 
 extern uint8_t kernelelf[];
 extern int32_t kernelelf_size;
@@ -781,8 +782,78 @@ static void patch_1352_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2A4CBA), "\x90\x90\x90\x90\x90", 5);
 }
 
-void patch_kernel() {
+/* Retail 14.00 patches: all 17 sites were checked against the decrypted ELF,
+ * including the jump destination and the immediate operands in kmem_alloc.
+ * Guard the complete eight-byte window, accepting either original code or our
+ * replacement with the unmodified tail. Never require a loader-patched kernel. */
+static int patch_1400_v119(uint64_t kernbase) {
+    static const struct {
+        uint32_t offset;
+        uint8_t length;
+        uint8_t original[8];
+        uint8_t replacement[8];
+    } patches[] = {
+        { 0x2BD85D, 1, { 0x76, 0x17, 0x49, 0x89, 0xEA, 0x49, 0x83, 0xC2 }, { 0xEB } }, /* site_00 */
+        { 0x3B3830, 8, { 0x55, 0x48, 0x89, 0xE5, 0xE8, 0x57, 0xC9, 0x06 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 } }, /* site_01 */
+        { 0x3B38A0, 8, { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x47, 0x68 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 } }, /* site_02 */
+        { 0x3B38C0, 8, { 0x55, 0x48, 0x89, 0xE5, 0xF6, 0x47, 0x17, 0x04 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 } }, /* site_03 */
+        { 0x76C530, 1, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x80 }, { 0xC3 } }, /* site_04 */
+        { 0x1FC801, 5, { 0xE8, 0x3A, 0x63, 0x44, 0x00, 0x85, 0xC0, 0x0F }, { 0x31, 0xC0, 0x90, 0x90, 0x90 } }, /* site_05 */
+        { 0x2FCB5C, 6, { 0x0F, 0x85, 0xAD, 0x07, 0x00, 0x00, 0x49, 0x8B }, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_06 */
+        { 0x3673F5, 1, { 0x77, 0x1C, 0x48, 0xB8, 0x36, 0x10, 0x00, 0x00 }, { 0xEB } }, /* site_07 */
+        { 0x3678E1, 5, { 0x48, 0x8B, 0x41, 0x08, 0x44, 0x89, 0xC3, 0x48 }, { 0xE9, 0x7C, 0x02, 0x00, 0x00 } }, /* site_08 */
+        { 0x4787B4, 2, { 0x74, 0x0B, 0x49, 0xC7, 0x44, 0x24, 0x38, 0x00 }, { 0x90, 0x90 } }, /* site_09 */
+        { 0x46660C, 1, { 0x03, 0x00, 0x00, 0x00, 0x6A, 0x00, 0x50, 0x6A }, { 0x07 } }, /* site_10 */
+        { 0x466614, 1, { 0x03, 0xE8, 0x06, 0x27, 0xE9, 0xFF, 0x48, 0x83 }, { 0x07 } }, /* site_11 */
+        { 0x2BDA97, 2, { 0x77, 0x47, 0x48, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF }, { 0x90, 0x90 } }, /* site_12 */
+        { 0x2BD9A2, 2, { 0x77, 0x5C, 0x48, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF }, { 0x90, 0x90 } }, /* site_13 */
+        { 0x3045BE, 6, { 0x0F, 0x85, 0x98, 0x00, 0x00, 0x00, 0xE8, 0x57 }, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_14 */
+        { 0x135A45, 5, { 0xE8, 0x76, 0xAD, 0x1A, 0x00, 0x48, 0x8B, 0x45 }, { 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_15 */
+        { 0x2A4F6A, 5, { 0xE8, 0x51, 0xB8, 0x03, 0x00, 0x41, 0x89, 0xDF }, { 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_16 */
+    };
+    for (uint64_t i = 0; i < sizeof(patches) / sizeof(patches[0]); ++i) {
+        const volatile uint8_t *code = (void *)(kernbase + patches[i].offset);
+        int original = 1, patched = 1;
+        for (uint64_t j = 0; j < sizeof(patches[i].original); ++j) {
+            uint8_t value = code[j];
+            uint8_t expected = j < patches[i].length ?
+                patches[i].replacement[j] : patches[i].original[j];
+            original &= value == patches[i].original[j];
+            patched &= value == expected;
+        }
+        if (!original && !patched) {
+            printf("[ps4debug-ng] 14.00 patch mismatch at %x - kernel not patched\n",
+                   patches[i].offset);
+            return 1;
+        }
+    }
+
+    /* These slots are nosys in the retail ELF. Do not overwrite another payload. */
+    for (uint32_t slot = PS4DEBUG_SYS_PROC_LIST; slot <= PS4DEBUG_SYS_CONSOLE_CMD; ++slot) {
+        if (sysents[slot].sy_call != (void *)(kernbase + 0x1C0520)) {
+            printf("[ps4debug-ng] 14.00 syscall %u is occupied - kernel not patched\n", slot);
+            return 1;
+        }
+    }
+
+    uint64_t cr0 = read_cr0();
+    write_cr0(cr0 & ~X86_CR0_WP);
+    for (uint64_t i = 0; i < sizeof(patches) / sizeof(patches[0]); ++i) {
+        volatile uint8_t *code = (void *)(kernbase + patches[i].offset);
+        for (uint64_t j = 0; j < patches[i].length; ++j) {
+            code[j] = patches[i].replacement[j];
+        }
+    }
+    write_cr0(cr0);
+    return 0;
+}
+
+int patch_kernel(void) {
     uint64_t kernbase = get_kbase();
+
+    if (cachedFirmware == 1400) {
+        return patch_1400_v119(kernbase);
+    }
 
     cpu_disable_wp();
 
@@ -854,10 +925,12 @@ void patch_kernel() {
         default:
             printf("[ps4debug-ng] unsupported firmware %u - kernel not patched\n",
                    cachedFirmware);
-            break;
+            cpu_enable_wp();
+            return 1;
     }
 
     cpu_enable_wp();
+    return 0;
 }
 
 void *rwx_alloc(uint64_t size) {
@@ -981,20 +1054,17 @@ int load_debugger() {
 
 int runinstaller() {
 
-    init_ksdk();
-
-    extern unsigned short cachedFirmware;
-    extern uint64_t cachedKernelBase;
-    if (cachedFirmware == 0) {
-        cachedFirmware = 900;
-        cachedKernelBase = 0;
-        init_ksdk();
+    /* No guessed firmware fallback: unresolved kernel pointers are unsafe. */
+    if (init_ksdk()) {
+        return 1;
     }
 
     ascii_art();
 
     printf("[ps4debug-ng] patching kernel...\n");
-    patch_kernel();
+    if (patch_kernel()) {
+        return 1;
+    }
 
     printf("[ps4debug-ng] loading kdebugger...\n");
     if(load_kdebugger()) {
