@@ -55,10 +55,15 @@ with comparisons to both 13.50 and 13.52. The web variant has new pthread entry
 points; the ordinary and system variants keep their 13.52 offsets. The four
 VM-map lock calls use adapters supplying the kernel's file/line arguments.
 
-The 14.00 installer verifies all patch windows before writing, accepts original
-code or this payload's exact replacements, and rejects unexpected bytes or
-occupied syscall slots 257-262. It restores the incoming CR0 value after patching.
-Other payloads that modify these windows differently may be rejected.
+The 14.00 installer verifies all patch windows before writing. It accepts retail
+code, its own replacements, and the verified loader patches at the three
+return-one sites and `0x1FC801`, with unchanged trailing bytes. Accepted loader
+patches are normalized to this payload's replacements.
+
+Unexpected bytes or occupied syscall slots 257-262 are rejected before patching.
+All mismatched windows are logged with their actual eight bytes. The installer
+restores the incoming CR0 value after patching. Other loader patch forms may
+still be rejected.
 
 ---
 

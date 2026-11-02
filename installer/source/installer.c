@@ -782,23 +782,26 @@ static void patch_1352_v119(uint64_t kernbase) {
     memcpy((void *)(kernbase + 0x2A4CBA), "\x90\x90\x90\x90\x90", 5);
 }
 
-/* Retail 14.00 patches: all 17 sites were checked against the decrypted ELF,
- * including the jump destination and the immediate operands in kmem_alloc.
- * Guard the complete eight-byte window, accepting either original code or our
- * replacement with the unmodified tail. Never require a loader-patched kernel. */
+/* Match complete eight-byte windows before writing any patches. Accept retail
+ * code, our replacements, or the verified loader forms below with retail tails.
+ * Every accepted form is normalized to the replacement bytes. */
 static int patch_1400_v119(uint64_t kernbase) {
     static const struct {
         uint32_t offset;
         uint8_t length;
         uint8_t original[8];
         uint8_t replacement[8];
+        /* Loader prefixes: MOV AL,1; RET; NOP, or XOR EAX,EAX; JMP +1.
+         * The short jump skips one leftover byte to the original continuation. */
+        uint8_t loader_length;
+        uint8_t loader[8];
     } patches[] = {
         { 0x2BD85D, 1, { 0x76, 0x17, 0x49, 0x89, 0xEA, 0x49, 0x83, 0xC2 }, { 0xEB } }, /* site_00 */
-        { 0x3B3830, 8, { 0x55, 0x48, 0x89, 0xE5, 0xE8, 0x57, 0xC9, 0x06 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 } }, /* site_01 */
-        { 0x3B38A0, 8, { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x47, 0x68 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 } }, /* site_02 */
-        { 0x3B38C0, 8, { 0x55, 0x48, 0x89, 0xE5, 0xF6, 0x47, 0x17, 0x04 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 } }, /* site_03 */
+        { 0x3B3830, 8, { 0x55, 0x48, 0x89, 0xE5, 0xE8, 0x57, 0xC9, 0x06 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 }, 4, { 0xB0, 0x01, 0xC3, 0x90 } }, /* site_01 */
+        { 0x3B38A0, 8, { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x47, 0x68 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 }, 4, { 0xB0, 0x01, 0xC3, 0x90 } }, /* site_02 */
+        { 0x3B38C0, 8, { 0x55, 0x48, 0x89, 0xE5, 0xF6, 0x47, 0x17, 0x04 }, { 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3 }, 4, { 0xB0, 0x01, 0xC3, 0x90 } }, /* site_03 */
         { 0x76C530, 1, { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x80 }, { 0xC3 } }, /* site_04 */
-        { 0x1FC801, 5, { 0xE8, 0x3A, 0x63, 0x44, 0x00, 0x85, 0xC0, 0x0F }, { 0x31, 0xC0, 0x90, 0x90, 0x90 } }, /* site_05 */
+        { 0x1FC801, 5, { 0xE8, 0x3A, 0x63, 0x44, 0x00, 0x85, 0xC0, 0x0F }, { 0x31, 0xC0, 0x90, 0x90, 0x90 }, 5, { 0x31, 0xC0, 0xEB, 0x01, 0x00 } }, /* site_05 */
         { 0x2FCB5C, 6, { 0x0F, 0x85, 0xAD, 0x07, 0x00, 0x00, 0x49, 0x8B }, { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_06 */
         { 0x3673F5, 1, { 0x77, 0x1C, 0x48, 0xB8, 0x36, 0x10, 0x00, 0x00 }, { 0xEB } }, /* site_07 */
         { 0x3678E1, 5, { 0x48, 0x8B, 0x41, 0x08, 0x44, 0x89, 0xC3, 0x48 }, { 0xE9, 0x7C, 0x02, 0x00, 0x00 } }, /* site_08 */
@@ -811,21 +814,32 @@ static int patch_1400_v119(uint64_t kernbase) {
         { 0x135A45, 5, { 0xE8, 0x76, 0xAD, 0x1A, 0x00, 0x48, 0x8B, 0x45 }, { 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_15 */
         { 0x2A4F6A, 5, { 0xE8, 0x51, 0xB8, 0x03, 0x00, 0x41, 0x89, 0xDF }, { 0x90, 0x90, 0x90, 0x90, 0x90 } }, /* site_16 */
     };
+    int mismatch = 0;
     for (uint64_t i = 0; i < sizeof(patches) / sizeof(patches[0]); ++i) {
         const volatile uint8_t *code = (void *)(kernbase + patches[i].offset);
+        uint8_t actual[8];
         int original = 1, patched = 1;
+        int loader_match = patches[i].loader_length != 0;
         for (uint64_t j = 0; j < sizeof(patches[i].original); ++j) {
-            uint8_t value = code[j];
+            uint8_t value = actual[j] = code[j];
             uint8_t expected = j < patches[i].length ?
                 patches[i].replacement[j] : patches[i].original[j];
             original &= value == patches[i].original[j];
             patched &= value == expected;
+            loader_match &= value == (j < patches[i].loader_length ?
+                patches[i].loader[j] : patches[i].original[j]);
         }
-        if (!original && !patched) {
-            printf("[ps4debug-ng] 14.00 patch mismatch at %x - kernel not patched\n",
-                   patches[i].offset);
-            return 1;
+        if (!original && !patched && !loader_match) {
+            printf("[ps4debug-ng] 14.00 patch mismatch at %x - kernel not patched "
+                   "(found: %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+                   patches[i].offset, (unsigned)actual[0], (unsigned)actual[1],
+                   (unsigned)actual[2], (unsigned)actual[3], (unsigned)actual[4],
+                   (unsigned)actual[5], (unsigned)actual[6], (unsigned)actual[7]);
+            mismatch = 1;
         }
+    }
+    if (mismatch) {
+        return 1;
     }
 
     /* These slots are nosys in the retail ELF. Do not overwrite another payload. */
