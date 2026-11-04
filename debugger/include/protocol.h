@@ -10,7 +10,7 @@
 #include "../../version.h"
 
 #define PACKET_VERSION          "1.3"
-#define PACKET_BRANDING         "ps4debug-NG by OSR v" PS4DEBUG_NG_VERSION_STR
+#define PACKET_BRANDING         "ps4debug-NG by Pharaoh2k v" PS4DEBUG_NG_VERSION_STR
 #define PACKET_MAGIC            0xFFAABBCC
 
 #define CMD_VERSION             0xBD000001

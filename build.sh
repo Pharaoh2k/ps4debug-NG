@@ -92,4 +92,4 @@ build_installer
 cp ./installer/installer.bin ./ps4debug-ng.bin
 
 echo ""
-echo "enjoy ps4debug-NG! OpenSourcereR :P"
+echo "enjoy ps4debug-NG! Pharaoh2k :P"

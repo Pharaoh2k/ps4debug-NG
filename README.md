@@ -20,7 +20,7 @@ should work without modification.
 
 ## Supported firmwares
 
-38 firmware versions across the 5.05-14.00 range. Each has a dedicated kernel
+39 firmware versions across the 5.05-14.02 range. Each has a dedicated kernel
 patch routine. Unsupported firmware is rejected before kernel patching or
 debugger installation.
 
@@ -35,7 +35,7 @@ debugger installation.
 | 11.xx | 11.00, 11.02, 11.50, 11.52                  |
 | 12.xx | 12.00, 12.02, 12.50, 12.52                  |
 | 13.xx | 13.00, 13.02, 13.04, 13.50, 13.52           |
-| 14.xx | 14.00                                       |
+| 14.xx | 14.00, 14.02                                |
 
 Clients can read the running FW with `CMD_FW_VERSION` (returns a `uint16_t` in
 `major*100 + minor` form - e.g. `0x1F4 = 500 = 5.00`).
@@ -55,10 +55,17 @@ with comparisons to both 13.50 and 13.52. The web variant has new pthread entry
 points; the ordinary and system variants keep their 13.52 offsets. The four
 VM-map lock calls use adapters supplying the kernel's file/line arguments.
 
-The 14.00 installer verifies all patch windows before writing. It accepts retail
-code, its own replacements, and the verified loader patches at the three
-return-one sites and `0x1FC801`, with unchanged trailing bytes. Accepted loader
-patches are normalized to this payload's replacements.
+**14.02 support:** checked the same way against the decrypted retail 14.02 kernel
+and libkernel variants, with comparisons to both 14.00 and 13.52. All three
+libkernel variants and every kernel data global keep their 14.00 offsets. Kernel
+functions and patch sites moved; the patch bytes and the lock adapters are
+unchanged.
+
+The 14.00 and 14.02 installers verify all patch windows before writing. They
+accept retail code, their own replacements, and the verified loader patches at
+the three return-one sites and `0x1FC801` (14.02: `0x1FCC01`), with unchanged
+trailing bytes. Accepted loader patches are normalized to this payload's
+replacements.
 
 Unexpected bytes or occupied syscall slots 257-262 are rejected before patching.
 All mismatched windows are logged with their actual eight bytes. The installer
@@ -370,10 +377,8 @@ kernel module, and begins listening on port 744.
 You should see a system notification confirming the payload is alive:
 
 ```
-ps4debug-NG by OSR v1.3.3
-Special thanks to golden,
-Ctn, SiSTRo, DeathRGH
-& Pharaoh2k! ♥
+ps4debug-NG v1.3.4
+by Pharaoh2k
 ```
 
 (The version line is built from `version.h`, so it tracks the current build automatically.)
