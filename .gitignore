@@ -24,3 +24,4 @@ __pycache__/
 
 # Host unit-test binaries
 debugger/tests/test_debug_port
+debugger/tests/test_capability

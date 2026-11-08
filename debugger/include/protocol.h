@@ -6,6 +6,7 @@
 #include <ps4.h>
 #include "errno.h"
 #include "kdbg.h"
+#include "capability.h"
 
 #include "../../version.h"
 

@@ -14,7 +14,7 @@ citations. Nothing is summarized from external documentation.
 | Symbol              | Value                                | Source                     |
 |---------------------|--------------------------------------|----------------------------|
 | `PACKET_VERSION`    | `"1.3"`                              | protocol.h:12              |
-| `PACKET_BRANDING`   | `"ps4debug-NG by Pharaoh2k v1.3.4<NUL>1.1"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
+| `PACKET_BRANDING`   | `"ps4debug-NG by Pharaoh2k v1.3.4<NUL>1.2"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
 | `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:14              |
 | `BROADCAST_MAGIC`   | `0xFFFFAAAA`                         | server.h:19                |
 
@@ -138,12 +138,17 @@ on another port by sending the 12-byte extended attach body
 | >= 12     | `1`..`65535`         | the requested port (e.g. 7550)     |
 | >= 12     | > `65535`            | rejected: `CMD_ERROR`, no attach   |
 
+Support is advertised as capability level **`1.2`** in the `CMD_BRANDING`
+reply (§2.1). Clients should read that level first and send the 12-byte body
+only when it is `>= 1.2`; otherwise (older payload, or no level at all) they
+should listen on 755 and send the legacy 8-byte body.
+
 The port is validated before `ptrace(PT_ATTACH)`, so an invalid value never
 leaves the target attached. Existing 4/8-byte clients are unaffected.
 
-Older servers ignore the extra 4 bytes and still connect to 755; a client that
-listens only on its custom port will then see `CMD_ERROR` from the attach (the
-connect-back fails) and can retry by listening on 755.
+If a client skips that check, older servers ignore the extra 4 bytes and still
+connect to 755; a client listening only on its custom port then sees
+`CMD_ERROR` from the attach (the connect-back fails) and can retry on 755.
 
 Interrupts (hit breakpoints/watchpoints, single-step completions) are delivered
 asynchronously as fixed-size packets of `DEBUG_INTERRUPT_PACKET_SIZE = 0x4A0`
@@ -192,13 +197,17 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 - **Request body:** none.
 - **Response:** `uint32_t length`, then `length` bytes: the human branding string
   (`PACKET_BRANDING`, e.g. `"ps4debug-NG by Pharaoh2k v1.3.4"`), a single `NUL`, then a
-  **capability level** string (`"1.1"`), with no trailing NUL.
+  **capability level** string (`"1.2"`), with no trailing NUL.
 - **Capability level:** C-string clients read up to the first `NUL` and see only
   the unchanged brand; capability-aware clients read past the `NUL` to get the
   level and gate features on it. Capability `1.0` introduced `0xBDAACC04` bulk
   write; `1.1` guarantees content-verified process writes and truthful terminal
-  status. Built from `PACKET_BRANDING "\0" "1.1"` in `server.c` - the literals
-  are split so `\0` is a NUL byte, not an octal escape.
+  status; `1.2` adds the optional `debug_port` field of `CMD_DEBUG_ATTACH`
+  (custom interrupt-channel port, §1.9). Built from
+  `PACKET_BRANDING "\0" PACKET_CAPABILITY_LEVEL` in `server.c`
+  (`PACKET_CAPABILITY_LEVEL` lives in `capability.h`) - the literals are split
+  so `\0` is a NUL byte, not an octal escape. The capability level is
+  independent of the payload version (`PS4DEBUG_NG_VERSION_STR`).
 
 #### `CMD_PLATFORM_ID = 0xBD000502`
 - **Request body:** none.
