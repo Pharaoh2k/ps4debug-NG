@@ -21,3 +21,6 @@ Thumbs.db
 _tools/
 __pycache__/
 *.pyc
+
+# Host unit-test binaries
+debugger/tests/test_debug_port

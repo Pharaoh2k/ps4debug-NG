@@ -7,6 +7,7 @@
 #include "protocol.h"
 #include "net.h"
 #include "ptrace.h"
+#include "debug_port.h"
 
 struct __reg64 {
     uint64_t r_r15;
@@ -130,8 +131,6 @@ struct debug_interrupt_packet {
 
 #define	DBREG_DRX(d,x) ((d)->dr[(x)])
 
-#define DEBUG_PORT 755
-
 extern int g_debugging;
 extern struct server_client *curdbgcli;
 extern struct debug_context *curdbgctx;
@@ -140,7 +139,7 @@ extern ScePthreadMutex g_debug_mutex;
 
 extern int g_stepping_lwpid;
 
-int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client);
+int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client, uint16_t port);
 void debug_cleanup(struct debug_context *dbgctx);
 
 int debug_process_stop_handle(int fd, struct cmd_packet *packet);
