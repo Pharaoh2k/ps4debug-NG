@@ -23,7 +23,7 @@ citations. Nothing is summarized from external documentation.
 | Port | Protocol | Role                                          | Source            |
 |------|----------|-----------------------------------------------|-------------------|
 | 744  | TCP      | Main command server                           | server.h:15       |
-| 755  | TCP      | Asynchronous debug-interrupt channel (server→client) | debug.h:137 |
+| 755  | TCP      | Asynchronous debug-interrupt channel (server→client); default, client-selectable (§1.9) | debug_port.h:9 |
 | 1010 | UDP      | Discovery broadcast                           | server.h:18       |
 
 ### 1.3 Byte order
@@ -123,8 +123,27 @@ unauthenticated.
 ### 1.9 Asynchronous interrupt channel (port 755)
 
 When a client issues `CMD_DEBUG_ATTACH`, the server also opens a TCP connection
-*outbound* to that client's IP on port 755 (debug.c:25). The client must be
-listening on 755 before sending `CMD_DEBUG_ATTACH`.
+*outbound* to that client's IP on port 755 by default (debug.c:23). The client
+must be listening on that port before sending `CMD_DEBUG_ATTACH`.
+
+**Selecting a different port.** Binding to 755 requires root on Android/Linux
+and may clash with other tools, so a client can ask the server to connect back
+on another port by sending the 12-byte extended attach body
+(`struct cmd_debug_attach_ex_packet`, see §2.3):
+
+| `datalen` | `debug_port` field   | Port the server connects to        |
+|-----------|----------------------|------------------------------------|
+| < 12      | absent (legacy)      | 755                                |
+| >= 12     | `0`                  | 755                                |
+| >= 12     | `1`..`65535`         | the requested port (e.g. 7550)     |
+| >= 12     | > `65535`            | rejected: `CMD_ERROR`, no attach   |
+
+The port is validated before `ptrace(PT_ATTACH)`, so an invalid value never
+leaves the target attached. Existing 4/8-byte clients are unaffected.
+
+Older servers ignore the extra 4 bytes and still connect to 755; a client that
+listens only on its custom port will then see `CMD_ERROR` from the attach (the
+connect-back fails) and can retry by listening on 755.
 
 Interrupts (hit breakpoints/watchpoints, single-step completions) are delivered
 asynchronously as fixed-size packets of `DEBUG_INTERRUPT_PACKET_SIZE = 0x4A0`
@@ -549,10 +568,22 @@ All debug commands (except `ATTACH`, see §1.5) require an already-attached
 debug session. The dispatcher returns early with no response if none exists.
 
 #### `CMD_DEBUG_ATTACH = 0xBDBB0001` (kern.c:98-166, via server.c:188)
-- **Request body:** `struct cmd_debug_attach_packet` (8 bytes, `{pid, client_ip}`).
-- **Response:** `CMD_SUCCESS`, or `CMD_ALREADY_DEBUG` / `CMD_ERROR`.
-- **Side effect:** server opens outbound TCP to client on port 755 (see §1.9)
-  and `ptrace(PT_ATTACH)`-es the target.
+- **Request body:** `struct cmd_debug_attach_packet` (8 bytes, `{pid, client_ip}`),
+  or optionally `struct cmd_debug_attach_ex_packet` (12 bytes,
+  `{pid, client_ip, debug_port}`; all `uint32_t` little-endian).
+  `client_ip` is in network byte order (as in `sin_addr.s_addr`); `debug_port`
+  is a plain host-order integer (e.g. `7550`), `0` = default 755.
+- **Response:** `CMD_SUCCESS`, or `CMD_ALREADY_DEBUG` / `CMD_ERROR`
+  (`CMD_ERROR` is also returned for `debug_port > 65535`).
+- **Side effect:** server opens outbound TCP to client on port 755, or on
+  `debug_port` if given (see §1.9), and `ptrace(PT_ATTACH)`-es the target.
+
+Example extended body attaching to pid `0x55` with the interrupt channel on
+7550 (`0x1D7E`), client `192.168.1.10`:
+
+```
+55 00 00 00   C0 A8 01 0A   7E 1D 00 00
+```
 
 `debug_attach_handle` at kern.c:92-96 is a stub that always replies `CMD_ERROR`
 and returns `1`; it exists so the switch at kern.c:784 is complete, but is
