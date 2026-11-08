@@ -73,7 +73,7 @@ int cmd_handler(int fd, struct cmd_packet *packet, unsigned char client_idx) {
             return 0;
         case CMD_BRANDING: {
 
-            static const char brand[] = PACKET_BRANDING "\0" "1.1";
+            static const char brand[] = PACKET_BRANDING "\0" PACKET_CAPABILITY_LEVEL;
             len = (uint32_t)(sizeof(brand) - 1);
             net_send_all(fd, &len, sizeof(uint32_t));
             net_send_all(fd, brand, len);
