@@ -8,7 +8,10 @@ struct debug_context *curdbgctx;
 ScePthreadMutex g_debug_mutex;
 int g_stepping_lwpid;
 
-int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client) {
+_Static_assert(__builtin_offsetof(struct cmd_debug_attach_ex_packet, debug_port) == DEBUG_ATTACH_PORT_OFFSET,
+               "debug_port offset must match DEBUG_ATTACH_PORT_OFFSET");
+
+int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client, uint16_t port) {
     struct sockaddr_in server;
     int r;
 
@@ -17,7 +20,7 @@ int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client) {
     server.sin_len = sizeof(server);
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = client->sin_addr.s_addr;
-    server.sin_port = sceNetHtons(DEBUG_PORT);
+    server.sin_port = sceNetHtons(port);
     memset(server.sin_zero, 0, sizeof(server.sin_zero));
 
     dbgctx->dbgfd = sceNetSocket("interrupt", AF_INET, SOCK_STREAM, 0);
@@ -221,6 +224,12 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     }
     uint32_t pid = *(uint32_t *)packet->data;
 
+    uint16_t debug_port;
+    if (debug_attach_resolve_port(packet->data, packet->datalen, &debug_port) != 0) {
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
     if (kern_ptrace(PT_ATTACH, (int)pid, 0, 0) < 0) {
         net_send_int32(fd, CMD_ERROR);
         return 1;
@@ -253,7 +262,7 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     }
 
     memset(&svc->dbgctx, 0, sizeof(svc->dbgctx));
-    if (connect_debugger(&svc->dbgctx, &client_for_events) != 0) {
+    if (connect_debugger(&svc->dbgctx, &client_for_events, debug_port) != 0) {
         net_send_int32(fd, CMD_ERROR);
         return 1;
     }
