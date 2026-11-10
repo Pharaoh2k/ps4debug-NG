@@ -26,6 +26,6 @@ _error:
 	call __error
 	pop rcx
 	mov [rax], ecx
-	movq rax, -1
-	movq rdx, -1
+	mov rax, -1
+	mov rdx, -1
 	ret

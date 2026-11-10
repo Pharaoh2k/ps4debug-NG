@@ -21,3 +21,6 @@ Thumbs.db
 _tools/
 __pycache__/
 *.pyc
+tests/fuzz_cmd_guards*
+build-support/windows-lib/
+build-support/windows-lib/
