@@ -135,8 +135,8 @@ struct debug_interrupt_packet {   // 0x4A0 bytes
     uint32_t            lwpid;
     uint32_t            status;
     char                tdname[40];
-    struct __reg64      reg64;      // GP registers; 184 bytes
-    struct savefpu_ymm  savefpu;    // FPU+YMM; 512 bytes
+    struct __reg64      reg64;      // GP registers; 176 bytes (sizeof, natural alignment)
+    struct savefpu_ymm  savefpu;    // FPU+YMM; 832 bytes (getfpregs sends 832)
     struct __dbreg64    dbreg64;    // 16× uint64_t = 128 bytes
 };
 ```
@@ -167,7 +167,7 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 
 #### `CMD_FW_VERSION = 0xBD000500`
 - **Request body:** none.
-- **Response:** `uint16_t` firmware version (BCD, e.g. `0x505` = 5.05).
+- **Response:** `uint16_t` firmware version in `major*100 + minor` form (e.g. `0x1F4` = 500 = 5.00, per README).
 
 #### `CMD_BRANDING = 0xBD000501`
 - **Request body:** none.
@@ -592,7 +592,7 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 
 #### `CMD_DEBUG_GETREGS = 0xBDBB0008` (kern.c:626-639)
 - **Request body:** `struct cmd_debug_getregs_packet` (4 bytes, `lwpid`).
-- **Response:** `CMD_SUCCESS`, `struct __reg64` (184 bytes; debug.h:11-38).
+- **Response:** `CMD_SUCCESS`, `struct __reg64` (176 bytes = sizeof with natural alignment; the payload sends 176 - not 184 as previously documented. Offsets: 15x u64 GP regs, trapno, fs/gs, err, es/ds, then rip/cs/rflags/rsp/ss).
 
 #### `CMD_DEBUG_SETREGS = 0xBDBB0009` (kern.c:641-655)
 - **Request body:** `struct cmd_debug_setregs_packet` (8 bytes, `{lwpid, length}`).
