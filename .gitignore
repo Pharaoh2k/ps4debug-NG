@@ -21,3 +21,4 @@ Thumbs.db
 _tools/
 __pycache__/
 *.pyc
+tests/fuzz_cmd_guards*

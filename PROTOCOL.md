@@ -1081,3 +1081,26 @@ diagnostics were removed.
 Wire layouts (struct sizes/fields, opcodes, status codes, enums) are authoritative;
 per-command `file:line` citations are best-effort and can lag source edits - treat
 them as starting points, not exact anchors.*
+
+---
+
+## 10. Payload-side hardening limits (ps4debug-NG)
+
+The payload rejects malformed packets before dispatch. Well-behaved clients
+(sending full-size request structs, as every known client does) are unaffected.
+
+- `packet.datalen` above **16 MiB** is rejected with `CMD_TOO_MUCH_DATA`
+  (`CMD_MAX_DATALEN` in `debugger/include/cmd_guards.h`).
+- `packet.datalen` below the fixed struct size a command requires is rejected
+  with `CMD_DATA_NULL`. Requirements are centralized in
+  `debugger/source/cmd_guards.c` (`cmd_min_datalen`) and enforced for every
+  command in `handle_client()`; `tests/check_table.py` verifies the table
+  covers every dispatched command.
+- Secondary client-supplied lengths are capped: kernel read/write **16 MiB**,
+  console print/notify strings **64 KiB**, scan values/patterns **4 KiB**
+  (`KERN_RW_MAX_LENGTH`, `CONSOLE_MSG_MAX_LENGTH`, `PROC_SCAN_MAX_VALUE_LEN`).
+  Oversized requests get `CMD_TOO_MUCH_DATA`.
+- As a backstop, `net_alloc_buffer()` refuses allocations above **256 MiB**
+  (returns NULL, which handlers already treat as `CMD_DATA_NULL`).
+
+Wire layouts, command IDs, status codes, and enum values are unchanged.

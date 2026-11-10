@@ -5,6 +5,10 @@
 #include "kdbg.h"
 #include "../../syscalls.h"
 
+// Console print/notify messages are short UI strings; bound the
+// client-supplied length instead of malloc'ing it verbatim.
+#define CONSOLE_MSG_MAX_LENGTH 0x10000u
+
 int console_print_handle(int fd, struct cmd_packet *packet) {
     uint32_t *lenp;
     uint32_t length;
@@ -17,14 +21,22 @@ int console_print_handle(int fd, struct cmd_packet *packet) {
     }
 
     length = *lenp;
+    if (length > CONSOLE_MSG_MAX_LENGTH) {
+        net_send_int32(fd, CMD_TOO_MUCH_DATA);
+        return 1;
+    }
+
     data = net_alloc_buffer(length);
     if (!data) {
         net_send_int32(fd, CMD_DATA_NULL);
         return 1;
     }
 
-    memset(data, NULL, length);
-    net_recv_all(fd, data, length, 1);
+    memset(data, 0, length);
+    if (net_recv_all(fd, data, length, 1) != (int)length) {
+        free(data);
+        return 1;
+    }
     syscall(PS4DEBUG_SYS_CONSOLE_CMD, 2, data);
     net_send_int32(fd, CMD_SUCCESS);
     free(data);
@@ -41,14 +53,21 @@ int console_notify_handle(int fd, struct cmd_packet *packet) {
         return 1;
     }
 
+    if (!np->length || np->length > CONSOLE_MSG_MAX_LENGTH) {
+        net_send_int32(fd, CMD_TOO_MUCH_DATA);
+        return 1;
+    }
     data = net_alloc_buffer(np->length);
     if (!data) {
         net_send_int32(fd, CMD_DATA_NULL);
         return 1;
     }
 
-    memset(data, NULL, np->length);
-    net_recv_all(fd, data, np->length, 1);
+    memset(data, 0, np->length);
+    if (net_recv_all(fd, data, np->length, 1) != (int)np->length) {
+        free(data);
+        return 1;
+    }
     sceSysUtilSendSystemNotificationWithText(np->messageType, data);
     net_send_int32(fd, CMD_SUCCESS);
     free(data);

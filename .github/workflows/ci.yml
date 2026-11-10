@@ -1,0 +1,17 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check datalen table covers every dispatched command
+        run: python3 tests/check_table.py
+
+      - name: Build + run packet-guard fuzzer
+        run: make -C tests fuzz-run

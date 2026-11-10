@@ -12,7 +12,15 @@ void prefault(void *address, size_t size) {
     }
 }
 
+// Backstop for handlers that pass a client-controlled size: this only
+// bounds the worst-case malloc+prefault (a multi-GB request used to hang
+// the console). Handlers must still enforce their own tighter limits.
+#define NET_ALLOC_MAX_SIZE (256u * 1024u * 1024u)
+
 void *net_alloc_buffer(size_t size) {
+    if (size > NET_ALLOC_MAX_SIZE) {
+        return NULL;
+    }
     void *p = malloc(size);
     if (p) prefault(p, size);
     return p;
