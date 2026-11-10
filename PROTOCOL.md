@@ -1104,3 +1104,36 @@ The payload rejects malformed packets before dispatch. Well-behaved clients
   (returns NULL, which handlers already treat as `CMD_DATA_NULL`).
 
 Wire layouts, command IDs, status codes, and enum values are unchanged.
+
+---
+
+## 11. Structured errors, module list, and region snapshot (ps4debug-NG extensions)
+
+These commands and status codes extend the original ps4debug wire protocol;
+existing clients are unaffected (unknown commands return `CMD_ERROR`).
+
+### New status codes (§1.6 additions)
+
+| Code               | Value        | Meaning                                    |
+|--------------------|--------------|--------------------------------------------|
+| `CMD_ERR_PID`      | `0xF0000010` | Invalid pid (not found / not permitted).   |
+| `CMD_ERR_UNMAPPED` | `0xF0000011` | Address range not mapped/readable.         |
+| `CMD_ERR_NOATTACH` | `0xF0000012` | Debug command without an attached session. |
+| `CMD_ERR_RANGE`    | `0xF0000013` | Address+length overflow / out of range.    |
+
+Returned by the new handlers and selected existing paths in place of generic
+`CMD_ERROR` where the failure mode is known; clients that only test
+`CMD_FATAL_STATUS` behave exactly as before.
+
+#### `CMD_PROC_MODULES = 0xBDAA0025`
+- **Request body:** `struct cmd_proc_maps_packet` (4 bytes, `pid`).
+- **Response:** `CMD_SUCCESS`, `uint32_t num`, then `num` x
+  `{char name[32]; uint64_t base; uint64_t size}` (48 bytes each) - VM map
+  entries deduplicated by backing-file name; `base` = lowest mapped address
+  of the module, `size` = span. Nameless mappings are skipped.
+
+#### `CMD_PROC_SNAPSHOT = 0xBDAA0026`
+- **Request body:** `{uint32_t pid; uint64_t address; uint64_t length}` (20 bytes).
+- **Response:** `CMD_SUCCESS`, then the region bytes in 64 KiB chunks - one
+  round trip for large regions (vs. `length/64KiB` for `CMD_PROC_READ`).
+  `length == 0` or address+length overflow returns `CMD_ERR_RANGE`.

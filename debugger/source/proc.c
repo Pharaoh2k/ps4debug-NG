@@ -2,6 +2,26 @@
 
 #include "proc.h"
 
+#define MOD_ENTRY  ((uint32_t)CMD_PROC_MODULES_ENTRY_SIZE)
+#define SNAP_CHUNK ((uint32_t)0x10000)
+
+struct cmd_proc_snapshot_packet {
+    uint32_t pid;
+    uint64_t address;
+    uint64_t length;
+} __attribute__((packed));
+
+// Defined in cxx_rt_shim.c but not declared in any payload header.
+void *memchr(const void *s, int c, size_t n);
+
+// strnlen does not exist in the payload libc; bounded name length for the
+// module list entries (which are fixed 32-byte fields anyway).
+static size_t module_name_len(const char *s, size_t max) {
+    size_t n = 0;
+    while (n < max && s[n]) n++;
+    return n;
+}
+
 #include "Zydis.h"
 #include "aob_scan.h"
 #include "proc_ptwalk.h"
@@ -1839,6 +1859,13 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
 
         uint64_t limit = toRead >= plen ? toRead - plen : 0;
         for (uint64_t j = 0; j <= limit; j++) {
+            // fast path: every match must start with pattern[0] at an exact
+            // byte; skip ahead with memchr (exact, preserves match counting)
+            if (mask[0] == 1) {
+                void *hit = memchr(readBuf + j, pattern[0], (size_t)(limit - j) + 1);
+                if (!hit) break;
+                j = (uint64_t)((uint8_t *)hit - readBuf);
+            }
 
             bool matched = true;
             for (uint32_t k = 0; k < plen; k++) {
@@ -2491,6 +2518,138 @@ int proc_scan_get_handle(int fd, struct cmd_packet *packet) {
     return 0;
 }
 
+struct module_list_ctx {
+    uint8_t *out;
+    size_t   cap;
+    uint32_t count;
+    int      overflow;
+};
+
+static void module_emit(struct module_list_ctx *ctx, const char *name,
+                        uint64_t base, uint64_t size) {
+    size_t need = (size_t)(ctx->count + 1) * MOD_ENTRY;
+    if (need > ctx->cap) {
+        ctx->overflow = 1;
+        return;
+    }
+    uint8_t *dst = ctx->out + (size_t)ctx->count * MOD_ENTRY;
+    memset(dst, 0, MOD_ENTRY);
+    memcpy(dst, name, module_name_len(name, 31));
+    memcpy(dst + 32, &base, 8);
+    memcpy(dst + 40, &size, 8);
+    ctx->count++;
+}
+
+int proc_modules_handle(int fd, struct cmd_packet *packet) {
+    struct cmd_proc_maps_packet *mp = (struct cmd_proc_maps_packet *)packet->data;
+    if (!mp || (int32_t)mp->pid <= 0) {
+        net_send_int32(fd, CMD_ERR_PID);
+        return 1;
+    }
+
+    struct sys_proc_vm_map_args args;
+    memset(&args, 0, sizeof(args));
+    if (sys_proc_cmd(mp->pid, SYS_PROC_VM_MAP, &args)) {
+        net_send_int32(fd, CMD_ERR_PID);
+        return 1;
+    }
+    size_t size = (size_t)args.num * sizeof(struct proc_vm_map_entry);
+    args.maps = (struct proc_vm_map_entry *)net_alloc_buffer(size);
+    if (!args.maps) {
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+    if (sys_proc_cmd(mp->pid, SYS_PROC_VM_MAP, &args)) {
+        free(args.maps);
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+
+    // Group VM map entries by backing-file name; base = lowest start of the
+    // group, size = span. Entries without a name are skipped (they have no
+    // module identity). Deduplicated against already-emitted names.
+    struct module_list_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    size_t cap = (size_t)(args.num + 1) * MOD_ENTRY;
+    ctx.out = (uint8_t *)net_alloc_buffer(cap);
+    if (!ctx.out) {
+        free(args.maps);
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+    ctx.cap = cap;
+    for (uint64_t i = 0; i < args.num; i++) {
+        struct proc_vm_map_entry *e = &args.maps[i];
+        if (!e->name[0]) {
+            continue;
+        }
+        uint64_t base = e->start;
+        uint64_t end = e->end;
+        for (uint64_t j = i + 1; j < args.num; j++) {
+            if (strncmp(args.maps[j].name, e->name, 32) == 0) {
+                if (args.maps[j].start < base) base = args.maps[j].start;
+                if (args.maps[j].end > end) end = args.maps[j].end;
+            }
+        }
+        int dup = 0;
+        for (uint32_t k = 0; k < ctx.count; k++) {
+            if (strncmp((char *)ctx.out + (size_t)k * MOD_ENTRY, e->name, 32) == 0) {
+                dup = 1;
+                break;
+            }
+        }
+        if (!dup) {
+            module_emit(&ctx, e->name, base, end - base);
+        }
+    }
+
+    free(args.maps);
+    if (ctx.overflow) {
+        free(ctx.out);
+        net_send_int32(fd, CMD_ERROR);
+        return 1;
+    }
+    net_send_int32(fd, CMD_SUCCESS);
+    net_send_all(fd, &ctx.count, 4);
+    if (ctx.count) {
+        net_send_all(fd, ctx.out, (int)((size_t)ctx.count * MOD_ENTRY));
+    }
+    free(ctx.out);
+    return 0;
+}
+
+int proc_snapshot_handle(int fd, struct cmd_packet *packet) {
+    struct cmd_proc_snapshot_packet *sp =
+        (struct cmd_proc_snapshot_packet *)packet->data;
+    if (!sp || (int32_t)sp->pid <= 0) {
+        net_send_int32(fd, CMD_ERR_PID);
+        return 1;
+    }
+    if (sp->length == 0 || sp->address + sp->length < sp->address) {
+        net_send_int32(fd, CMD_ERR_RANGE);
+        return 1;
+    }
+    uint64_t remaining = sp->length;
+    uint64_t address = sp->address;
+    net_send_int32(fd, CMD_SUCCESS);
+    while (remaining > 0) {
+        uint32_t chunk = remaining > SNAP_CHUNK ? SNAP_CHUNK : (uint32_t)remaining;
+        void *buf = net_alloc_buffer(chunk);
+        if (!buf) {
+            return 1;
+        }
+        if (sys_proc_rw(sp->pid, address, buf, chunk, 0) != 0) {
+            free(buf);
+            return 1;
+        }
+        net_send_all(fd, buf, (int)chunk);
+        free(buf);
+        address += chunk;
+        remaining -= chunk;
+    }
+    return 0;
+}
+
 int proc_handle(int fd, struct cmd_packet *packet, unsigned char client_idx) {
     switch(packet->cmd) {
         case CMD_PROC_LIST:           return proc_list_handle(fd, packet);
@@ -2526,6 +2685,8 @@ int proc_handle(int fd, struct cmd_packet *packet, unsigned char client_idx) {
         case CMD_PROC_SCAN_START:     return proc_scan_start_handle(fd, packet);
         case CMD_PROC_SCAN_COUNT:     return proc_scan_count_handle(fd, packet);
         case CMD_PROC_SCAN_GET:       return proc_scan_get_handle(fd, packet);
+        case CMD_PROC_MODULES:        return proc_modules_handle(fd, packet);
+        case CMD_PROC_SNAPSHOT:       return proc_snapshot_handle(fd, packet);
         case 0xBDAA0024u:             return proc_assemble_handle(fd, packet);
     }
 

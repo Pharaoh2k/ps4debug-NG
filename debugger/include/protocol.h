@@ -45,6 +45,8 @@
 #define CMD_PROC_SCAN_START     0xBDAACC01
 #define CMD_PROC_SCAN_COUNT     0xBDAACC02
 #define CMD_PROC_SCAN_GET       0xBDAACC03
+#define CMD_PROC_MODULES           0xBDAA0025
+#define CMD_PROC_SNAPSHOT          0xBDAA0026
 #define CMD_PROC_NOP            0xBDAACC06
 
 #define CMD_DEBUG_ATTACH            0xBDBB0001
@@ -89,6 +91,14 @@
 #define CMD_DATA_NULL            0xF0000003
 #define CMD_ALREADY_DEBUG        0xF0000004
 #define CMD_INVALID_INDEX        0xF0000005
+
+// Structured errors (ps4debug-NG extension): returned instead of generic
+// CMD_ERROR where the failure mode is known. Wire-compatible - clients that
+// only check CMD_FATAL_STATUS behave as before.
+#define CMD_ERR_PID             0xF0000010
+#define CMD_ERR_UNMAPPED        0xF0000011
+#define CMD_ERR_NOATTACH        0xF0000012
+#define CMD_ERR_RANGE           0xF0000013
 
 #define CMD_FATAL_STATUS(s) ((s >> 28) == 15)
 
@@ -432,6 +442,8 @@ struct cmd_proc_scan_get_packet {
     uint32_t count;
 } __attribute__((packed));
 #define CMD_PROC_SCAN_GET_PACKET_SIZE 8
+#define CMD_PROC_MODULES_ENTRY_SIZE   48
+#define CMD_PROC_SNAPSHOT_PACKET_SIZE 20
 
 struct cmd_proc_info_packet {
     uint32_t pid;

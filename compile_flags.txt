@@ -1,0 +1,171 @@
+# clangd/pi-lens configuration for the ps4debug-NG payload sources.
+#
+# The payload only compiles inside the vendored ps4-payload-sdk include paths
+# (debugger/Makefile: -I$(LIBPS4)/include -I. -Iinclude ...). Without this file
+# every SDK-provided type/macro reads as unknown to clangd-based tools.
+#
+# Host-header conflicts, renamed for navigation only (the release build uses
+# -nostdlib + FreeBSD-targeted headers where these don't collide):
+# - __dev_t: FreeBSD-internal type used by the SDK's file.h; absent from UCRT.
+# - the symbols below: libPS4 declares them as function pointers, colliding
+#   with the host UCRT declarations.
+# int-conversion warnings are pre-existing payload idioms (errno = NULL,
+# dlsym-style void* to integer) accepted by the release gcc build.
+-Idebugger
+-Idebugger/include
+-Idebugger/third_party/zydis
+-Idebugger/third_party/keystone/include
+-Ips4-payload-sdk/libPS4/include
+-Ikdebugger/include
+-Iinstaller/include
+-D__FreeBSD__
+-D__dev_t=dev_t
+-Wno-int-conversion
+-std=c11
+-Dasctime=ps4_asctime
+-Dasctime_r=ps4_asctime_r
+-Dclosedir=ps4_closedir
+-Dctime=ps4_ctime
+-Dctime_r=ps4_ctime_r
+-Ddirfd=ps4_dirfd
+-Dexecve=ps4_execve
+-Dfclose=ps4_fclose
+-Dfopen=ps4_fopen
+-Dfprintf=ps4_fprintf
+-Dfread=ps4_fread
+-Dfseek=ps4_fseek
+-Dftell=ps4_ftell
+-Dfwrite=ps4_fwrite
+-Dgetgid=ps4_getgid
+-Dgetpid=ps4_getpid
+-Dgetprogname=ps4_getprogname
+-Dgetuid=ps4_getuid
+-Dgmtime=ps4_gmtime
+-Dgmtime_s=ps4_gmtime_s
+-Dindex=ps4_index
+-Disdigit=ps4_isdigit
+-Dlocaltime=ps4_localtime
+-Dlocaltime_r=ps4_localtime_r
+-Dmktime=ps4_mktime
+-Dopendir=ps4_opendir
+-Dpthread_self=ps4_pthread_self
+-Dpthread_setaffinity_np=ps4_pthread_setaffinity_np
+-Dreaddir=ps4_readdir
+-Dreaddir_r=ps4_readdir_r
+-Drewinddir=ps4_rewinddir
+-Drindex=ps4_rindex
+-DsceCameraClose=ps4_sceCameraClose
+-DsceCameraGetConfig=ps4_sceCameraGetConfig
+-DsceCameraGetDeviceConfig=ps4_sceCameraGetDeviceConfig
+-DsceCameraGetDeviceInfo=ps4_sceCameraGetDeviceInfo
+-DsceCameraGetFrameData=ps4_sceCameraGetFrameData
+-DsceCameraIsAttached=ps4_sceCameraIsAttached
+-DsceCameraOpen=ps4_sceCameraOpen
+-DsceCameraSetConfig=ps4_sceCameraSetConfig
+-DsceCameraStart=ps4_sceCameraStart
+-DsceCameraStop=ps4_sceCameraStop
+-DsceHttpUriParse=ps4_sceHttpUriParse
+-DsceKernelAddReadEvent=ps4_sceKernelAddReadEvent
+-DsceKernelAddUserEvent=ps4_sceKernelAddUserEvent
+-DsceKernelAllocateDirectMemory=ps4_sceKernelAllocateDirectMemory
+-DsceKernelClose=ps4_sceKernelClose
+-DsceKernelCreateEqueue=ps4_sceKernelCreateEqueue
+-DsceKernelDeleteEqueue=ps4_sceKernelDeleteEqueue
+-DsceKernelError=ps4_sceKernelError
+-DsceKernelGetCurrentCpu=ps4_sceKernelGetCurrentCpu
+-DsceKernelGetDirectMemorySize=ps4_sceKernelGetDirectMemorySize
+-DsceKernelGetFsSandboxRandomWord=ps4_sceKernelGetFsSandboxRandomWord
+-DsceKernelGetProcessTime=ps4_sceKernelGetProcessTime
+-DsceKernelGetSystemSwVersion=ps4_sceKernelGetSystemSwVersion
+-DsceKernelGettimeofday=ps4_sceKernelGettimeofday
+-DsceKernelJitCreateAliasOfSharedMemory=ps4_sceKernelJitCreateAliasOfSharedMemory
+-DsceKernelJitCreateSharedMemory=ps4_sceKernelJitCreateSharedMemory
+-DsceKernelJitMapSharedMemory=ps4_sceKernelJitMapSharedMemory
+-DsceKernelLoadStartModule=ps4_sceKernelLoadStartModule
+-DsceKernelLseek=ps4_sceKernelLseek
+-DsceKernelMapDirectMemory=ps4_sceKernelMapDirectMemory
+-DsceKernelOpen=ps4_sceKernelOpen
+-DsceKernelRead=ps4_sceKernelRead
+-DsceKernelSleep=ps4_sceKernelSleep
+-DsceKernelStat=ps4_sceKernelStat
+-DsceKernelUsleep=ps4_sceKernelUsleep
+-DsceNetAccept=ps4_sceNetAccept
+-DsceNetBind=ps4_sceNetBind
+-DsceNetConnect=ps4_sceNetConnect
+-DsceNetCtlGetInfo=ps4_sceNetCtlGetInfo
+-DsceNetCtlInit=ps4_sceNetCtlInit
+-DsceNetCtlTerm=ps4_sceNetCtlTerm
+-DsceNetGetsockname=ps4_sceNetGetsockname
+-DsceNetGetsockopt=ps4_sceNetGetsockopt
+-DsceNetHtonl=ps4_sceNetHtonl
+-DsceNetHtonll=ps4_sceNetHtonll
+-DsceNetHtons=ps4_sceNetHtons
+-DsceNetInetNtop=ps4_sceNetInetNtop
+-DsceNetInetPton=ps4_sceNetInetPton
+-DsceNetListen=ps4_sceNetListen
+-DsceNetNtohl=ps4_sceNetNtohl
+-DsceNetNtohll=ps4_sceNetNtohll
+-DsceNetNtohs=ps4_sceNetNtohs
+-DsceNetRecv=ps4_sceNetRecv
+-DsceNetSend=ps4_sceNetSend
+-DsceNetSetsockopt=ps4_sceNetSetsockopt
+-DsceNetSocket=ps4_sceNetSocket
+-DsceNetSocketAbort=ps4_sceNetSocketAbort
+-DsceNetSocketClose=ps4_sceNetSocketClose
+-DscePadClose=ps4_scePadClose
+-DscePadInit=ps4_scePadInit
+-DscePadOpen=ps4_scePadOpen
+-DscePadRead=ps4_scePadRead
+-DscePadReadState=ps4_scePadReadState
+-DscePthreadCancel=ps4_scePthreadCancel
+-DscePthreadCreate=ps4_scePthreadCreate
+-DscePthreadDetach=ps4_scePthreadDetach
+-DscePthreadExit=ps4_scePthreadExit
+-DscePthreadJoin=ps4_scePthreadJoin
+-DscePthreadMutexDestroy=ps4_scePthreadMutexDestroy
+-DscePthreadMutexInit=ps4_scePthreadMutexInit
+-DscePthreadMutexLock=ps4_scePthreadMutexLock
+-DscePthreadMutexTimedlock=ps4_scePthreadMutexTimedlock
+-DscePthreadMutexTrylock=ps4_scePthreadMutexTrylock
+-DscePthreadMutexUnlock=ps4_scePthreadMutexUnlock
+-DscePthreadSelf=ps4_scePthreadSelf
+-DscePthreadYield=ps4_scePthreadYield
+-DsceSysUtilSendSystemNotificationWithText=ps4_sceSysUtilSendSystemNotificationWithText
+-DsceSysmoduleLoadModule=ps4_sceSysmoduleLoadModule
+-DsceUsbdBulkTransfer=ps4_sceUsbdBulkTransfer
+-DsceUsbdCheckConnected=ps4_sceUsbdCheckConnected
+-DsceUsbdClearHalt=ps4_sceUsbdClearHalt
+-DsceUsbdClose=ps4_sceUsbdClose
+-DsceUsbdControlTransfer=ps4_sceUsbdControlTransfer
+-DsceUsbdExit=ps4_sceUsbdExit
+-DsceUsbdFreeConfigDescriptor=ps4_sceUsbdFreeConfigDescriptor
+-DsceUsbdFreeDeviceList=ps4_sceUsbdFreeDeviceList
+-DsceUsbdGetActiveConfigDescriptor=ps4_sceUsbdGetActiveConfigDescriptor
+-DsceUsbdGetConfigDescriptor=ps4_sceUsbdGetConfigDescriptor
+-DsceUsbdGetConfigDescriptorByValue=ps4_sceUsbdGetConfigDescriptorByValue
+-DsceUsbdGetDeviceDescriptor=ps4_sceUsbdGetDeviceDescriptor
+-DsceUsbdGetDeviceList=ps4_sceUsbdGetDeviceList
+-DsceUsbdInit=ps4_sceUsbdInit
+-DsceUsbdInterruptTransfer=ps4_sceUsbdInterruptTransfer
+-DsceUsbdOpen=ps4_sceUsbdOpen
+-DsceUsbdOpenDeviceWithVidPid=ps4_sceUsbdOpenDeviceWithVidPid
+-DsceUsbdResetDevice=ps4_sceUsbdResetDevice
+-DsceUsbdSetInterfaceAltSetting=ps4_sceUsbdSetInterfaceAltSetting
+-Dseekdir=ps4_seekdir
+-Dsetgid=ps4_setgid
+-Dsetregid=ps4_setregid
+-Dsetreuid=ps4_setreuid
+-Dsetuid=ps4_setuid
+-Dstrdup=ps4_strdup
+-Dstrlcpy=ps4_strlcpy
+-Dstrtok=ps4_strtok
+-Dsysarch=ps4_sysarch
+-Dsysctl=ps4_sysctl
+-Dsysctlbyname=ps4_sysctlbyname
+-Dtelldir=ps4_telldir
+-Dtime=ps4_time
+# Known limitation: srand/rand/atoi are declared by BOTH the host UCRT stdlib.h
+# and libPS4's libc.h (as function pointers). No -D rename can disambiguate two
+# live declarations of the same name, so proc.c keeps 3 redefinition errors in
+# host-side analysis. The release build (-nostdlib, FreeBSD-targeted headers)
+# is unaffected.

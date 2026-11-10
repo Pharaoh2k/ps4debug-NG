@@ -18,7 +18,7 @@
 #define	ENOMEM		12
 #define	EACCES		13
 #define	EFAULT		14
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	ENOTBLK		15
 #endif
 #define	EBUSY		16
@@ -31,7 +31,7 @@
 #define	ENFILE		23
 #define	EMFILE		24
 #define	ENOTTY		25
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	ETXTBSY		26
 #endif
 #define	EFBIG		27
@@ -45,7 +45,7 @@
 #define	ERANGE		34
 
 #define	EAGAIN		35
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	EWOULDBLOCK	EAGAIN
 #define	EINPROGRESS	36
 #define	EALREADY	37
@@ -81,13 +81,13 @@
 #endif
 #define	ENAMETOOLONG	63
 
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	EHOSTDOWN	64
 #define	EHOSTUNREACH	65
 #endif
 #define	ENOTEMPTY	66
 
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	EPROCLIM	67
 #define	EUSERS		68
 #define	EDQUOT		69
@@ -104,7 +104,7 @@
 #define	ENOLCK		77
 #define	ENOSYS		78
 
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	EFTYPE		79
 #define	EAUTH		80
 #define	ENEEDAUTH	81
@@ -123,14 +123,14 @@
 #define	ENOLINK		91
 #define	EPROTO		92
 
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	ENOTCAPABLE	93
 #define	ECAPMODE	94
 #define	ENOTRECOVERABLE	95
 #define	EOWNERDEAD	96
 #endif
 
-#ifndef _POSIX_SOURCE
+#ifndef PS4DEBUG_ERRNO_POSIX_SOURCE
 #define	ELAST		96
 #endif
 

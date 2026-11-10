@@ -39,6 +39,8 @@ static const struct cmd_datalen_req g_cmd_datalen_reqs[] = {
     { CMD_PROC_SCAN_START,        CMD_PROC_SCAN_START_PACKET_SIZE },
     { CMD_PROC_SCAN_COUNT,        CMD_PROC_SCAN_COUNT_PACKET_SIZE },
     { CMD_PROC_SCAN_GET,          CMD_PROC_SCAN_GET_PACKET_SIZE },
+    { CMD_PROC_MODULES,           CMD_PROC_MAPS_PACKET_SIZE },
+    { CMD_PROC_SNAPSHOT,          CMD_PROC_SNAPSHOT_PACKET_SIZE },
     { 0xBDAACC04u,                CMD_PROC_WRITE_MULTI_PACKET_SIZE }, // CMD_PROC_WRITE_MULTI
     // turboscan commands; payloads validated inside scan_turbo.c
     { 0xBDAACC10u,                0 }, // CMD_PROC_TURBOSCAN_CAPS
