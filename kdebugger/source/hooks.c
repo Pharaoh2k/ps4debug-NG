@@ -468,7 +468,7 @@ void hook_trap_fatal(struct trapframe *tf) {
 
 void install_syscall(uint32_t n, void *func) {
     struct sysent *p = &sysents[n];
-    memset(p, NULL, sizeof(struct sysent));
+    memset(p, 0, sizeof(struct sysent));
     p->sy_narg = 8;
     p->sy_call = func;
     p->sy_thrcnt = 1;

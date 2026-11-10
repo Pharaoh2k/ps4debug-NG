@@ -18,7 +18,7 @@ int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client) {
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = client->sin_addr.s_addr;
     server.sin_port = sceNetHtons(DEBUG_PORT);
-    memset(server.sin_zero, NULL, sizeof(server.sin_zero));
+    memset(server.sin_zero, 0, sizeof(server.sin_zero));
 
     dbgctx->dbgfd = sceNetSocket("interrupt", AF_INET, SOCK_STREAM, 0);
     if(dbgctx->dbgfd <= 0) {

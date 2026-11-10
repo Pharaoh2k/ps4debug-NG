@@ -3,6 +3,10 @@
 #include "kern.h"
 #include "kdbg.h"
 
+// Client-controlled kernel R/W size; larger requests are rejected rather
+// than malloc'd + prefaulted verbatim.
+#define KERN_RW_MAX_LENGTH (16u * 1024u * 1024u)
+
 int kern_base_handle(int fd, struct cmd_packet *packet) {
     uint64_t kbase = 0;
     sys_kern_base(&kbase);
@@ -15,6 +19,10 @@ int kern_read_handle(int fd, struct cmd_packet *packet) {
     struct cmd_kern_read_packet *rp = (struct cmd_kern_read_packet *)packet->data;
     if (!rp) {
         net_send_int32(fd, CMD_DATA_NULL);
+        return 0;
+    }
+    if (rp->length > KERN_RW_MAX_LENGTH) {
+        net_send_int32(fd, CMD_TOO_MUCH_DATA);
         return 0;
     }
 
@@ -38,6 +46,10 @@ int kern_write_handle(int fd, struct cmd_packet *packet) {
         net_send_int32(fd, CMD_DATA_NULL);
         return 0;
     }
+    if (wp->length > KERN_RW_MAX_LENGTH) {
+        net_send_int32(fd, CMD_TOO_MUCH_DATA);
+        return 0;
+    }
 
     void *data = net_alloc_buffer(wp->length);
     if (!data) {
@@ -46,7 +58,10 @@ int kern_write_handle(int fd, struct cmd_packet *packet) {
     }
 
     net_send_int32(fd, CMD_SUCCESS);
-    net_recv_all(fd, data, wp->length, 1);
+    if (net_recv_all(fd, data, wp->length, 1) != (int)wp->length) {
+        free(data);
+        return 1;
+    }
     sys_kern_rw(wp->address, data, wp->length, 1);
     net_send_int32(fd, CMD_SUCCESS);
     free(data);

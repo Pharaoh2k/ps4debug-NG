@@ -55,7 +55,7 @@ int map_elf(void *elf, void *exec) {
             }
 
             if (phdr->p_memsz - phdr->p_filesz) {
-                memset((uint8_t *)exec + phdr->p_paddr + phdr->p_filesz, NULL, phdr->p_memsz - phdr->p_filesz);
+                memset((uint8_t *)exec + phdr->p_paddr + phdr->p_filesz, 0, phdr->p_memsz - phdr->p_filesz);
             }
         }
     } else {

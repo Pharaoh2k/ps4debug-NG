@@ -2,6 +2,11 @@
 
 #include "net.h"
 
+// Non-blocking sockets return EWOULDBLOCK when the peer stalls; without a
+// backoff these loops spun at 100% CPU, and force-recv spun forever.
+#define NET_IO_BACKOFF_US   1000
+#define NET_IO_TIMEOUT_US   (10u * 1000u * 1000u) /* 10s */
+
 int net_select(int fd, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout) {
     return syscall(93, fd, readfds, writefds, exceptfds, timeout);
 }
@@ -25,6 +30,10 @@ int net_send_all(int fd, const void *data, int length) {
             if(errno && errno != EWOULDBLOCK) {
                 return sent;
             }
+            if ((uint64_t)offset * NET_IO_BACKOFF_US > NET_IO_TIMEOUT_US) {
+                return -1;
+            }
+            sceKernelUsleep(NET_IO_BACKOFF_US);
         } else {
             offset += sent;
             left -= sent;
@@ -53,6 +62,10 @@ int net_recv_all(int fd, void *data, int length, int force) {
         }
         if (recv < 0) {
             if (force && errno == EWOULDBLOCK) {
+                if ((uint64_t)offset * NET_IO_BACKOFF_US > NET_IO_TIMEOUT_US) {
+                    return -1;
+                }
+                sceKernelUsleep(NET_IO_BACKOFF_US);
                 continue;
             }
             return recv;
