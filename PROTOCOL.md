@@ -601,7 +601,7 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 
 #### `CMD_DEBUG_GETFPREGS = 0xBDBB000A` (kern.c:657-670)
 - **Request body:** `struct cmd_debug_getregs_packet` (4 bytes, `lwpid`).
-- **Response:** `CMD_SUCCESS`, `struct savefpu_ymm` (512 bytes; debug.h:88-97).
+- **Response:** `CMD_SUCCESS`, `struct savefpu_ymm` (832 bytes; debug.h:85-94).
 
 #### `CMD_DEBUG_SETFPREGS = 0xBDBB000B` (kern.c:672-686)
 - **Request body:** `struct cmd_debug_setregs_packet` (8 bytes).
