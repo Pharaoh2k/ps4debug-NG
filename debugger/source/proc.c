@@ -1814,6 +1814,10 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
     net_recv_all(fd, pattern, plen, 1);
     net_recv_all(fd, mask, plen, 1);
 
+    // Constant for the whole scan: is byte 0 of the pattern exact? Decided
+    // once here instead of testing mask[0] at every offset of every chunk.
+    const bool first_byte_exact = (mask[0] == 1);
+
     uint32_t chunkSize = 0x8000;
     if (chunkSize % plen != 0) {
         chunkSize = (chunkSize / plen) * plen;
@@ -1849,7 +1853,7 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
             // fast path: every match must start with pattern[0] at an exact
             // byte; skip ahead with memchr (mask byte 0 == 1 means exact,
             // so this preserves match counting)
-            if (mask[0] == 1) {
+            if (first_byte_exact) {
                 void *hit = memchr(readBuf + j, pattern[0], (size_t)(limit - j) + 1);
                 if (!hit) break;
                 j = (uint64_t)((uint8_t *)hit - readBuf);
