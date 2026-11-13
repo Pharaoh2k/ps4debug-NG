@@ -1786,7 +1786,11 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
         return 1;
     }
     uint32_t plen = sp->pattern_length;
-    if (plen == 0 || plen > PROC_SCAN_MAX_VALUE_LEN) {
+    if (plen == 0) {
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+    if (plen > PROC_SCAN_MAX_VALUE_LEN) {
         net_send_int32(fd, CMD_TOO_MUCH_DATA);
         return 1;
     }
@@ -2170,7 +2174,11 @@ int proc_scan_start_handle(int fd, struct cmd_packet *packet) {
 
     size_t valueLength = proc_scan_getSizeOfValueType(sp->valueType);
     if (!valueLength) valueLength = sp->lenData;
-    if (!valueLength || valueLength > PROC_SCAN_MAX_VALUE_LEN) {
+    if (!valueLength) {
+        net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+    if (valueLength > PROC_SCAN_MAX_VALUE_LEN) {
         net_send_int32(fd, CMD_TOO_MUCH_DATA);
         return 1;
     }
