@@ -228,6 +228,9 @@ int handle_client(struct server_client *svc) {
     }
 
 error:
+    // The allocated payload (up to CMD_MAX_DATALEN) leaks here if the client
+    // stalls or disconnects mid-transfer; free it before releasing the slot.
+    free(data);
     free_client(svc);
 
     return 0;
