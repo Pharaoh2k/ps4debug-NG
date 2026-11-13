@@ -15,8 +15,6 @@ int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client, u
     struct sockaddr_in server;
     int r;
 
-    g_debugging = 1;
-
     server.sin_len = sizeof(server);
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = client->sin_addr.s_addr;
@@ -25,6 +23,7 @@ int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client, u
 
     dbgctx->dbgfd = sceNetSocket("interrupt", AF_INET, SOCK_STREAM, 0);
     if(dbgctx->dbgfd <= 0) {
+        dbgctx->dbgfd = 0;
         return 1;
     }
 
@@ -33,6 +32,8 @@ int connect_debugger(struct debug_context *dbgctx, struct sockaddr_in *client, u
 
     r = sceNetConnect(dbgctx->dbgfd, (struct sockaddr *)&server, sizeof(server));
     if(r) {
+        sceNetSocketClose(dbgctx->dbgfd);
+        dbgctx->dbgfd = 0;
         return 1;
     }
 
@@ -230,25 +231,8 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
         return 1;
     }
 
-    if (kern_ptrace(PT_ATTACH, (int)pid, 0, 0) < 0) {
-        net_send_int32(fd, CMD_ERROR);
-        return 1;
-    }
-
-    {
-        int attach_status = 0;
-        int spins = 0;
-        while (wait4((int)pid, &attach_status, 1 , NULL) <= 0) {
-            if (++spins > 200) break;
-            sceKernelUsleep(1000);
-        }
-    }
-
-    if (kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
-        net_send_int32(fd, CMD_ERROR);
-        return 1;
-    }
-
+    // Connect back before touching the target, so a wrong port or a
+    // firewall fails without leaving the process traced.
     struct sockaddr_in client_for_events;
     memset(&client_for_events, 0, sizeof(client_for_events));
     client_for_events.sin_len    = sizeof(client_for_events);
@@ -267,6 +251,24 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
         return 1;
     }
 
+    if (kern_ptrace(PT_ATTACH, (int)pid, 0, 0) < 0) {
+        goto fail_close;
+    }
+
+    {
+        int attach_status = 0;
+        int spins = 0;
+        while (wait4((int)pid, &attach_status, 1 , NULL) <= 0) {
+            if (++spins > 200) break;
+            sceKernelUsleep(1000);
+        }
+    }
+
+    if (kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
+        kern_ptrace(PT_DETACH, (int)pid, 0, 0);
+        goto fail_close;
+    }
+
     memset(&g_debug_ctx, 0, sizeof(g_debug_ctx));
     g_debug_ctx.pid      = pid;
     g_debug_ctx.attached = 1;
@@ -275,9 +277,16 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     svc->debugging   = 1;
     curdbgcli        = svc;
     curdbgctx        = &svc->dbgctx;
+    g_debugging      = 1;
 
     net_send_int32(fd, CMD_SUCCESS);
     return 0;
+
+fail_close:
+    sceNetSocketClose(svc->dbgctx.dbgfd);
+    svc->dbgctx.dbgfd = 0;
+    net_send_int32(fd, CMD_ERROR);
+    return 1;
 }
 
 void debug_full_teardown(struct server_client *svc) {

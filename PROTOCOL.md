@@ -123,7 +123,7 @@ unauthenticated.
 ### 1.9 Asynchronous interrupt channel (port 755)
 
 When a client issues `CMD_DEBUG_ATTACH`, the server also opens a TCP connection
-*outbound* to that client's IP on port 755 by default (debug.c:23). The client
+*outbound* to that client's IP on port 755 by default (debug.c:21). The client
 must be listening on that port before sending `CMD_DEBUG_ATTACH`.
 
 **Selecting a different port.** Binding to 755 requires root on Android/Linux
@@ -143,12 +143,19 @@ reply (§2.1). Clients should read that level first and send the 12-byte body
 only when it is `>= 1.2`; otherwise (older payload, or no level at all) they
 should listen on 755 and send the legacy 8-byte body.
 
-The port is validated before `ptrace(PT_ATTACH)`, so an invalid value never
-leaves the target attached. Existing 4/8-byte clients are unaffected.
+The port is validated, and the connect-back is made, before
+`ptrace(PT_ATTACH)`: a wrong port, a closed listener or a firewall makes the
+attach fail with `CMD_ERROR` without touching the target, and no socket or
+debugging state is left behind, so the client can attach again. If
+`PT_ATTACH` or `PT_CONTINUE` fails after the connect-back, the server detaches
+the target (when needed) and closes the interrupt socket before replying
+`CMD_ERROR`. Existing 4/8-byte clients are unaffected.
 
-If a client skips that check, older servers ignore the extra 4 bytes and still
-connect to 755; a client listening only on its custom port then sees
-`CMD_ERROR` from the attach (the connect-back fails) and can retry on 755.
+Do not rely on retrying against older servers: they ignore the extra 4 bytes
+and connect to 755, and on 1.3.x builds before this change a failed
+connect-back leaves the target traced, so a second attach fails. Check the
+capability level first, and when talking to an older server listen on 755
+and send the legacy body.
 
 Interrupts (hit breakpoints/watchpoints, single-step completions) are delivered
 asynchronously as fixed-size packets of `DEBUG_INTERRUPT_PACKET_SIZE = 0x4A0`
