@@ -64,7 +64,7 @@ $(ODIR):
 .PHONY: clean test
 
 test:
-	$(MAKE) -C tests
+	$(MAKE) -C ../tests/unit
 
 clean:
 	rm -f $(TARGET) $(ODIR)/*.o

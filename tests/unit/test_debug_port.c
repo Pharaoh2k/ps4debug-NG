@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Host-side unit tests for debug_attach_resolve_port() (CMD_DEBUG_ATTACH port option).
-// Build and run with: make -C debugger test
+// Build and run with: make -C tests/unit (or make -C debugger test)
 
 #include <stdio.h>
 #include <string.h>
 
-#include "../include/debug_port.h"
+#include "debug_port.h"
 
 static int failures;
 
