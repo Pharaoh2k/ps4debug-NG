@@ -6,6 +6,7 @@
 #include <ps4.h>
 #include "errno.h"
 #include "kdbg.h"
+#include "capability.h"
 
 #include "../../version.h"
 
@@ -493,6 +494,14 @@ struct cmd_debug_attach_packet {
     uint32_t client_ip;
 } __attribute__((packed));
 #define CMD_DEBUG_ATTACH_PACKET_SIZE 8
+
+// Optional extended form: appends the interrupt-channel port (0 = default 755).
+struct cmd_debug_attach_ex_packet {
+    uint32_t pid;
+    uint32_t client_ip;
+    uint32_t debug_port;
+} __attribute__((packed));
+#define CMD_DEBUG_ATTACH_EX_PACKET_SIZE 12
 
 struct cmd_debug_breakpt_packet {
     uint32_t index;

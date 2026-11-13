@@ -7,6 +7,9 @@
 #include "proc_ptwalk.h"
 #include "scan_alias.h"
 
+// Defined in cxx_rt_shim.c but not declared in any payload header.
+void *memchr(const void *s, int c, size_t n);
+
 #define DISASM_READ_CHUNK  0x10000
 
 static void disasm_fill_entry(struct disasm_instr_entry *out,
@@ -358,6 +361,10 @@ int proc_read_handle(int fd, struct cmd_packet *packet) {
 
 #define PROC_USR_MIN  0x10000ULL
 #define PROC_USR_MAX  0x0000800000000000ULL
+
+// Upper bound for client-supplied scan value lengths (lenData / pattern
+// length). Matches the limit proc_scan_count_handle already applied.
+#define PROC_SCAN_MAX_VALUE_LEN 0x1000u
 static inline int proc_addr_range_ok(uint64_t a, uint64_t len) {
     if (len == 0) return 0;
     if (a < PROC_USR_MIN || a >= PROC_USR_MAX) return 0;
@@ -658,7 +665,7 @@ int proc_maps_handle(int fd, struct cmd_packet *packet) {
     mp = (struct cmd_proc_maps_packet *)packet->data;
 
     if(mp) {
-        memset(&args, NULL, sizeof(args));
+        memset(&args, 0, sizeof(args));
 
         if(sys_proc_cmd(mp->pid, SYS_PROC_VM_MAP, &args)) {
             net_send_int32(fd, CMD_ERROR);
@@ -1608,6 +1615,10 @@ int proc_scan_handle(int fd, struct cmd_packet *packet) {
     if (!valueLength) {
        valueLength = sp->lenData;
     }
+    if (sp->lenData > PROC_SCAN_MAX_VALUE_LEN) {
+       net_send_int32(fd, CMD_TOO_MUCH_DATA);
+       return 1;
+    }
 
     unsigned char *data = (unsigned char *)net_alloc_buffer(sp->lenData);
     if (!data) {
@@ -1620,7 +1631,7 @@ int proc_scan_handle(int fd, struct cmd_packet *packet) {
     net_recv_all(fd, data, sp->lenData, 1);
 
     struct sys_proc_vm_map_args args;
-    memset(&args, NULL, sizeof(struct sys_proc_vm_map_args));
+    memset(&args, 0, sizeof(struct sys_proc_vm_map_args));
     if (sys_proc_cmd(sp->pid, SYS_PROC_VM_MAP, &args)) {
         free(data);
         net_send_int32(fd, CMD_ERROR);
@@ -1782,6 +1793,10 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
         net_send_int32(fd, CMD_DATA_NULL);
         return 1;
     }
+    if (plen > PROC_SCAN_MAX_VALUE_LEN) {
+        net_send_int32(fd, CMD_TOO_MUCH_DATA);
+        return 1;
+    }
 
     uint8_t *pattern = (uint8_t *)net_alloc_buffer(plen);
     if (!pattern) {
@@ -1798,6 +1813,10 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
     net_send_int32(fd, CMD_SUCCESS);
     net_recv_all(fd, pattern, plen, 1);
     net_recv_all(fd, mask, plen, 1);
+
+    // Constant for the whole scan: is byte 0 of the pattern exact? Decided
+    // once here instead of testing mask[0] at every offset of every chunk.
+    const bool first_byte_exact = (mask[0] == 1);
 
     uint32_t chunkSize = 0x8000;
     if (chunkSize % plen != 0) {
@@ -1831,7 +1850,14 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
 
         uint64_t limit = toRead >= plen ? toRead - plen : 0;
         for (uint64_t j = 0; j <= limit; j++) {
-
+            // fast path: every match must start with pattern[0] at an exact
+            // byte; skip ahead with memchr (mask byte 0 == 1 means exact,
+            // so this preserves match counting)
+            if (first_byte_exact) {
+                void *hit = memchr(readBuf + j, pattern[0], (size_t)(limit - j) + 1);
+                if (!hit) break;
+                j = (uint64_t)((uint8_t *)hit - readBuf);
+            }
             bool matched = true;
             for (uint32_t k = 0; k < plen; k++) {
                 if (readBuf[j+k] != pattern[k] && mask[k] == 1) {
@@ -2164,6 +2190,10 @@ int proc_scan_start_handle(int fd, struct cmd_packet *packet) {
     if (!valueLength) valueLength = sp->lenData;
     if (!valueLength) {
         net_send_int32(fd, CMD_DATA_NULL);
+        return 1;
+    }
+    if (valueLength > PROC_SCAN_MAX_VALUE_LEN) {
+        net_send_int32(fd, CMD_TOO_MUCH_DATA);
         return 1;
     }
 

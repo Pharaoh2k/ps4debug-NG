@@ -134,6 +134,13 @@
 #define	ELAST		96
 #endif
 
+/*
+ * Orbis-specific socket error returned by sceNetAccept() when the listen
+ * socket has been aborted (e.g. via sceNetSocketAbort). No FreeBSD errno
+ * name exists for it; the numeric value is what the kernel returns.
+ */
+#define	EACCEPTABORT	163
+
 #define	ERESTART	(-1)
 #define	EJUSTRETURN	(-2)
 #define	ENOIOCTL	(-3)

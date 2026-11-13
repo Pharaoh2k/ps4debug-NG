@@ -61,7 +61,10 @@ $(ODIR)/Zydis.o: $(ZYDIR)/Zydis.c $(ZYDIR)/Zydis.h | $(ODIR)
 $(ODIR):
 	@mkdir $@
 
-.PHONY: clean
+.PHONY: clean test
+
+test:
+	$(MAKE) -C ../tests/unit
 
 clean:
 	rm -f $(TARGET) $(ODIR)/*.o
