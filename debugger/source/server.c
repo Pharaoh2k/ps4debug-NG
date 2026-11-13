@@ -1,24 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "server.h"
+#include "cmd_guards.h"
 
 struct server_client servclients[SERVER_MAXCLIENTS];
 
 int g_broadcast_fd;
 
+// Serializes alloc_client()/free_client(): the accept loop allocates slots
+// while client threads free them concurrently, and the id check-and-set is
+// not atomic.
+static ScePthreadMutex g_clients_mutex;
+
 struct server_client *alloc_client() {
+    scePthreadMutexLock(&g_clients_mutex);
     for(int i = 0; i < SERVER_MAXCLIENTS; i++) {
         if(servclients[i].id == 0) {
             servclients[i].id = i + 1;
+            scePthreadMutexUnlock(&g_clients_mutex);
             return &servclients[i];
         }
     }
+    scePthreadMutexUnlock(&g_clients_mutex);
 
     return NULL;
 }
 
 void free_client(struct server_client *svc) {
-    svc->id = 0;
     sceNetSocketClose(svc->fd);
 
     if (svc->debugging) {
@@ -31,7 +39,12 @@ void free_client(struct server_client *svc) {
         turboscan_alias_free_idx((unsigned char)slot);
     }
 
-    memset(svc, NULL, sizeof(struct server_client));
+    // Release the slot (id = 0 via memset) only after cleanup, and under the
+    // mutex, so the accept loop can't hand the slot to a new client while
+    // teardown is still running.
+    scePthreadMutexLock(&g_clients_mutex);
+    memset(svc, 0, sizeof(struct server_client));
+    scePthreadMutexUnlock(&g_clients_mutex);
 }
 
 int handle_version(int fd, struct cmd_packet *packet) {
@@ -102,7 +115,7 @@ int handle_client(struct server_client *svc) {
     unsigned char client_idx = (unsigned char)(svc - servclients);
 
     struct timeval tv;
-    memset(&tv, NULL, sizeof(tv));
+    memset(&tv, 0, sizeof(tv));
     tv.tv_usec = 1000;
 
     while(1) {
@@ -113,13 +126,13 @@ int handle_client(struct server_client *svc) {
         errno = NULL;
         net_select(FD_SETSIZE, &sfd, NULL, NULL, &tv);
 
-        if (errno == 9) {
+        if (errno == EBADF) {
             goto error;
         }
 
         if(FD_ISSET(fd, &sfd)) {
 
-            memset(&packet, NULL, CMD_PACKET_SIZE);
+            memset(&packet, 0, CMD_PACKET_SIZE);
 
             rsize = net_recv_all(fd, &packet, CMD_PACKET_SIZE, 0);
 
@@ -127,7 +140,7 @@ int handle_client(struct server_client *svc) {
                 goto error;
             }
 
-            if (errno == 54 || errno == 58 || errno == 9) {
+            if (errno == ECONNRESET || errno == ESHUTDOWN || errno == EBADF) {
                 goto error;
             }
         } else {
@@ -143,7 +156,7 @@ int handle_client(struct server_client *svc) {
                 scePthreadMutexUnlock(&g_debug_mutex);
             }
 
-            if (errno == 54 || errno == 58 || errno == 9) {
+            if (errno == ECONNRESET || errno == ESHUTDOWN || errno == EBADF) {
                 goto error;
             }
 
@@ -160,6 +173,20 @@ int handle_client(struct server_client *svc) {
         }
 
         length = packet.datalen;
+
+        // Reject oversized and truncated payloads before allocating or
+        // dispatching; handlers previously read their structs from
+        // packet->data without checking datalen.
+        if (length > CMD_MAX_DATALEN) {
+            net_send_int32(fd, CMD_TOO_MUCH_DATA);
+            goto error;
+        }
+
+        if (length < cmd_min_datalen(packet.cmd)) {
+            net_send_int32(fd, CMD_DATA_NULL);
+            goto error;
+        }
+
         if (length) {
 
             data = net_alloc_buffer(length);
@@ -201,6 +228,9 @@ int handle_client(struct server_client *svc) {
     }
 
 error:
+    // The allocated payload (up to CMD_MAX_DATALEN) leaks here if the client
+    // stalls or disconnects mid-transfer; free it before releasing the slot.
+    free(data);
     free_client(svc);
 
     return 0;
@@ -242,7 +272,7 @@ void *broadcast_thread(void *arg) {
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = IN_ADDR_ANY;
     server.sin_port = sceNetHtons(BROADCAST_PORT);
-    memset(server.sin_zero, NULL, sizeof(server.sin_zero));
+    memset(server.sin_zero, 0, sizeof(server.sin_zero));
 
     serv = sceNetSocket("broadsock", AF_INET, SOCK_DGRAM, 0);
     if(serv < 0) {
@@ -256,9 +286,6 @@ void *broadcast_thread(void *arg) {
 
     flag = 1;
     sceNetSetsockopt(serv, SOL_SOCKET, SO_REUSEADDR, (char *)&flag, sizeof(flag));
-
-    flag = 1;
-    sceNetSetsockopt(serv, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(flag));
 
     r = sceNetBind(serv, (struct sockaddr *)&server, sizeof(server));
     if(r) {
@@ -305,13 +332,15 @@ int start_server() {
     int r;
 
     ScePthread broadcast;
-    scePthreadCreate(&broadcast, NULL, broadcast_thread, NULL, "broadcast");
+    if (scePthreadCreate(&broadcast, NULL, broadcast_thread, NULL, "broadcast") != 0) {
+        return 1;
+    }
 
     server.sin_len = sizeof(server);
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = IN_ADDR_ANY;
     server.sin_port = sceNetHtons(SERVER_PORT);
-    memset(server.sin_zero, NULL, sizeof(server.sin_zero));
+    memset(server.sin_zero, 0, sizeof(server.sin_zero));
 
     serv = sceNetSocket("debugserver", AF_INET, SOCK_STREAM, 0);
     if(serv < 0) {
@@ -330,7 +359,7 @@ int start_server() {
         return 1;
     }
 
-    memset(servclients, NULL, sizeof(struct server_client) * SERVER_MAXCLIENTS);
+    memset(servclients, 0, sizeof(struct server_client) * SERVER_MAXCLIENTS);
 
     g_proc_auth_bits  = 0;
     g_debugging       = 0;
@@ -340,6 +369,7 @@ int start_server() {
     curdbgcli         = NULL;
 
     scePthreadMutexInit(&g_debug_mutex, NULL, NULL);
+    scePthreadMutexInit(&g_clients_mutex, NULL, NULL);
 
     g_stepping_lwpid = 0;
 
@@ -349,7 +379,7 @@ int start_server() {
         errno = NULL;
         fd = sceNetAccept(serv, (struct sockaddr *)&client, &len);
         if (fd < 0) {
-            if (errno == 163) {
+            if (errno == EACCEPTABORT) {
 
                 break;
             }
@@ -369,10 +399,14 @@ int start_server() {
             svc->fd = fd;
             svc->debugging = 0;
             memcpy(&svc->client, &client, sizeof(svc->client));
-            memset(&svc->dbgctx, NULL, sizeof(svc->dbgctx));
+            memset(&svc->dbgctx, 0, sizeof(svc->dbgctx));
 
             ScePthread thread;
-            scePthreadCreate(&thread, NULL, (void * (*)(void *))handle_client, (void *)svc, "clienthandler");
+            if (scePthreadCreate(&thread, NULL, (void * (*)(void *))handle_client, (void *)svc, "clienthandler") != 0) {
+                free_client(svc);
+                sceKernelUsleep(1000 * 250);
+                continue;
+            }
         }
 
         sceKernelUsleep(1000 * 250);

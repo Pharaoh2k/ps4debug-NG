@@ -119,11 +119,11 @@ int proc_rw_mem(struct proc *p, void *ptr, uint64_t size, void *data, uint64_t *
         return 0;
     }
 
-    memset(&iov, NULL, sizeof(iov));
+    memset(&iov, 0, sizeof(iov));
     iov.iov_base = (uint64_t)data;
     iov.iov_len = size;
 
-    memset(&uio, NULL, sizeof(uio));
+    memset(&uio, 0, sizeof(uio));
     uio.uio_iov = (uint64_t)&iov;
     uio.uio_iovcnt = 1;
     uio.uio_offset = (uint64_t)ptr;
