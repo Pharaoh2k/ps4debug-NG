@@ -27,9 +27,6 @@ struct server_client *alloc_client() {
 }
 
 void free_client(struct server_client *svc) {
-    scePthreadMutexLock(&g_clients_mutex);
-    svc->id = 0;
-    scePthreadMutexUnlock(&g_clients_mutex);
     sceNetSocketClose(svc->fd);
 
     if (svc->debugging) {
@@ -42,7 +39,12 @@ void free_client(struct server_client *svc) {
         turboscan_alias_free_idx((unsigned char)slot);
     }
 
+    // Release the slot (id = 0 via memset) only after cleanup, and under the
+    // mutex, so the accept loop can't hand the slot to a new client while
+    // teardown is still running.
+    scePthreadMutexLock(&g_clients_mutex);
     memset(svc, 0, sizeof(struct server_client));
+    scePthreadMutexUnlock(&g_clients_mutex);
 }
 
 int handle_version(int fd, struct cmd_packet *packet) {
@@ -177,12 +179,12 @@ int handle_client(struct server_client *svc) {
         // packet->data without checking datalen.
         if (length > CMD_MAX_DATALEN) {
             net_send_int32(fd, CMD_TOO_MUCH_DATA);
-            continue;
+            goto error;
         }
 
         if (length < cmd_min_datalen(packet.cmd)) {
             net_send_int32(fd, CMD_DATA_NULL);
-            continue;
+            goto error;
         }
 
         if (length) {
@@ -328,7 +330,6 @@ int start_server() {
 
     ScePthread broadcast;
     if (scePthreadCreate(&broadcast, NULL, broadcast_thread, NULL, "broadcast") != 0) {
-        sceNetSocketClose(serv);
         return 1;
     }
 

@@ -2,7 +2,7 @@
 //
 // Central packet->datalen requirements, enforced in handle_client() before
 // any dispatch. Every entry here must stay in sync with the switch statements
-// in server.c / proc.c / debug.c / kern.c / console.c; tests/check_table.sh
+// in server.c / proc.c / debug.c / kern.c / console.c; tests/check_table.py
 // verifies the sync in CI.
 
 #include "cmd_guards.h"

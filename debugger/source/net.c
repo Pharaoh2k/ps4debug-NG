@@ -6,6 +6,7 @@
 // backoff these loops spun at 100% CPU, and force-recv spun forever.
 #define NET_IO_BACKOFF_US   1000
 #define NET_IO_TIMEOUT_US   (10u * 1000u * 1000u) /* 10s */
+#define NET_IO_MAX_STALLS   (NET_IO_TIMEOUT_US / NET_IO_BACKOFF_US)
 
 int net_select(int fd, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout) {
     return syscall(93, fd, readfds, writefds, exceptfds, timeout);
@@ -16,6 +17,7 @@ int net_send_all(int fd, const void *data, int length) {
     int left = length;
     int offset = 0;
     int sent = 0;
+    int stalls = 0;
 
     errno = NULL;
 
@@ -30,13 +32,16 @@ int net_send_all(int fd, const void *data, int length) {
             if(errno && errno != EWOULDBLOCK) {
                 return sent;
             }
-            if ((uint64_t)offset * NET_IO_BACKOFF_US > NET_IO_TIMEOUT_US) {
+            // Time out only when no bytes have moved for NET_IO_TIMEOUT_US;
+            // progress resets the stall count.
+            if (++stalls > NET_IO_MAX_STALLS) {
                 return -1;
             }
             sceKernelUsleep(NET_IO_BACKOFF_US);
         } else {
             offset += sent;
             left -= sent;
+            stalls = 0;
         }
     }
 
@@ -47,6 +52,7 @@ int net_recv_all(int fd, void *data, int length, int force) {
     int left = length;
     int offset = 0;
     int recv = 0;
+    int stalls = 0;
 
     errno = NULL;
 
@@ -62,7 +68,7 @@ int net_recv_all(int fd, void *data, int length, int force) {
         }
         if (recv < 0) {
             if (force && errno == EWOULDBLOCK) {
-                if ((uint64_t)offset * NET_IO_BACKOFF_US > NET_IO_TIMEOUT_US) {
+                if (++stalls > NET_IO_MAX_STALLS) {
                     return -1;
                 }
                 sceKernelUsleep(NET_IO_BACKOFF_US);
@@ -73,6 +79,7 @@ int net_recv_all(int fd, void *data, int length, int force) {
 
         offset += recv;
         left -= recv;
+        stalls = 0;
     }
 
     return offset;
