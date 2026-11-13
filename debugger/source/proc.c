@@ -7,6 +7,9 @@
 #include "proc_ptwalk.h"
 #include "scan_alias.h"
 
+// Defined in cxx_rt_shim.c but not declared in any payload header.
+void *memchr(const void *s, int c, size_t n);
+
 #define DISASM_READ_CHUNK  0x10000
 
 static void disasm_fill_entry(struct disasm_instr_entry *out,
@@ -1831,7 +1834,14 @@ int proc_scan_aob_handle(int fd, struct cmd_packet *packet) {
 
         uint64_t limit = toRead >= plen ? toRead - plen : 0;
         for (uint64_t j = 0; j <= limit; j++) {
-
+            // fast path: every match must start with pattern[0] at an exact
+            // byte; skip ahead with memchr (mask byte 0 == 1 means exact,
+            // so this preserves match counting)
+            if (mask[0] == 1) {
+                void *hit = memchr(readBuf + j, pattern[0], (size_t)(limit - j) + 1);
+                if (!hit) break;
+                j = (uint64_t)((uint8_t *)hit - readBuf);
+            }
             bool matched = true;
             for (uint32_t k = 0; k < plen; k++) {
                 if (readBuf[j+k] != pattern[k] && mask[k] == 1) {
