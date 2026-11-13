@@ -24,5 +24,5 @@ __pycache__/
 tests/fuzz_cmd_guards*
 
 # Host unit-test binaries
-debugger/tests/test_debug_port
-debugger/tests/test_capability
+tests/unit/test_debug_port
+tests/unit/test_capability

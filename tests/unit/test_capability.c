@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Host-side tests for the capability level advertised by CMD_BRANDING.
-// Build and run with: make -C debugger test
+// Build and run with: make -C tests/unit (or make -C debugger test)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "../include/capability.h"
-#include "../../version.h"
+#include "capability.h"
+#include "version.h"
 
 static int failures;
 
@@ -78,7 +78,7 @@ int main(void) {
     CHECK(!supports_attach_port("1", 1));
 
     // server.c must build the CMD_BRANDING reply from the shared macro.
-    char *src = read_file("../source/server.c");
+    char *src = read_file(SERVER_C_PATH);
     CHECK(src != NULL);
     if (src) {
         CHECK(strstr(src, "PACKET_BRANDING \"\\0\" PACKET_CAPABILITY_LEVEL") != NULL);
