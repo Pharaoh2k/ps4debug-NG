@@ -102,6 +102,21 @@ int g_pending_sig_pid;
 int g_pending_signal;
 long g_last_alive_check;
 
+// A target left traced because PT_DETACH failed (after a failed attach, or in
+// debug_full_teardown). It is not a debug session (g_debug_ctx stays clear),
+// but it is kept so the next CMD_DEBUG_ATTACH or CMD_DEBUG_DETACH retries the
+// detach. g_debug_mutex.
+static int g_orphan_pid;
+
+static void debug_retry_orphan(void) {
+    int status = 0;
+    if (!g_orphan_pid) return;
+    int r = wait4(g_orphan_pid, &status, 1 , NULL);
+    if (attach_wait_gone(r, status, errno) || kern_ptrace(PT_DETACH, g_orphan_pid, 0, 0) >= 0) {
+        g_orphan_pid = 0;
+    }
+}
+
 #define BP_DISABLE_VERIFY_MAX 16
 static uint64_t g_recently_disabled_bps[BP_DISABLE_VERIFY_MAX];
 static int      g_recently_disabled_count = 0;
@@ -251,21 +266,34 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
         return 1;
     }
 
+    int reply = CMD_ERROR;
+    scePthreadMutexLock(&g_debug_mutex);
+
+    debug_retry_orphan();
+    if (g_debug_ctx.attached || g_orphan_pid) {
+        reply = CMD_ALREADY_DEBUG;
+        goto fail_close;
+    }
+
     if (kern_ptrace(PT_ATTACH, (int)pid, 0, 0) < 0) {
         goto fail_close;
     }
 
-    {
-        int attach_status = 0;
-        int spins = 0;
-        while (wait4((int)pid, &attach_status, 1 , NULL) <= 0) {
-            if (++spins > 200) break;
-            sceKernelUsleep(1000);
-        }
+    // Only continue once the target has really stopped; a timeout is a failure.
+    int attach_status = 0;
+    int spins = 0;
+    int wr;
+    while ((wr = wait4((int)pid, &attach_status, 1 , NULL)) <= 0) {
+        if (++spins > 1000) break;
+        sceKernelUsleep(1000);
     }
 
-    if (kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
-        kern_ptrace(PT_DETACH, (int)pid, 0, 0);
+    if (wr <= 0 || !attach_wait_stopped(attach_status) ||
+        kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
+        // Keep a target we could not detach, instead of forgetting it.
+        if (kern_ptrace(PT_DETACH, (int)pid, 0, 0) < 0) {
+            g_orphan_pid = (int)pid;
+        }
         goto fail_close;
     }
 
@@ -279,13 +307,15 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     curdbgctx        = &svc->dbgctx;
     g_debugging      = 1;
 
+    scePthreadMutexUnlock(&g_debug_mutex);
     net_send_int32(fd, CMD_SUCCESS);
     return 0;
 
 fail_close:
+    scePthreadMutexUnlock(&g_debug_mutex);
     sceNetSocketClose(svc->dbgctx.dbgfd);
     svc->dbgctx.dbgfd = 0;
-    net_send_int32(fd, CMD_ERROR);
+    net_send_int32(fd, reply);
     return 1;
 }
 
@@ -329,7 +359,9 @@ void debug_full_teardown(struct server_client *svc) {
             if (lwpids) free(lwpids);
         }
 
-        kern_ptrace(PT_DETACH, g_debug_ctx.pid, 0, 0);
+        if (kern_ptrace(PT_DETACH, g_debug_ctx.pid, 0, 0) < 0) {
+            g_orphan_pid = (int)g_debug_ctx.pid;
+        }
     }
 
     if (svc && svc->dbgctx.dbgfd > 0) {
@@ -342,11 +374,17 @@ void debug_full_teardown(struct server_client *svc) {
 }
 
 int debug_detach_handle(int fd, struct cmd_packet *packet) {
+    scePthreadMutexLock(&g_debug_mutex);
     if (!g_debug_ctx.attached) {
-        net_send_int32(fd, CMD_ERROR);
-        return 1;
+        int orphan = g_orphan_pid;
+        debug_retry_orphan();
+        int released = orphan && !g_orphan_pid;
+        scePthreadMutexUnlock(&g_debug_mutex);
+        net_send_int32(fd, released ? CMD_SUCCESS : CMD_ERROR);
+        return released ? 0 : 1;
     }
     debug_full_teardown(curdbgcli);
+    scePthreadMutexUnlock(&g_debug_mutex);
     net_send_int32(fd, CMD_SUCCESS);
     return 0;
 }

@@ -10,7 +10,7 @@ ROOT	:=	$(abspath $(CURDIR)/../..)
 INCS	:=	-iquote $(ROOT)/debugger/include -iquote $(ROOT)
 CFLAGS	:=	-O2 -std=c11 -Wall -Wextra -Werror $(INCS)
 
-TESTS	:=	test_debug_port test_capability
+TESTS	:=	test_debug_port test_capability test_attach_wait test_attach_guards
 
 .PHONY: all clean
 
@@ -22,6 +22,13 @@ test_debug_port: test_debug_port.c $(ROOT)/debugger/include/debug_port.h
 
 test_capability: test_capability.c $(ROOT)/debugger/include/capability.h $(ROOT)/version.h
 	$(HOSTCC) $(CFLAGS) -DSERVER_C_PATH='"$(ROOT)/debugger/source/server.c"' -o $@ $<
+
+test_attach_wait: test_attach_wait.c $(ROOT)/debugger/include/attach_wait.h
+	$(HOSTCC) $(CFLAGS) -o $@ $<
+
+test_attach_guards: test_attach_guards.c $(ROOT)/debugger/source/debug.c $(ROOT)/debugger/source/server.c
+	$(HOSTCC) $(CFLAGS) -DDEBUG_C_PATH='"$(ROOT)/debugger/source/debug.c"' \
+		-DSERVER_C_PATH='"$(ROOT)/debugger/source/server.c"' -o $@ $<
 
 clean:
 	rm -f $(TESTS)

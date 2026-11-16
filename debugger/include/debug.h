@@ -8,6 +8,7 @@
 #include "net.h"
 #include "ptrace.h"
 #include "debug_port.h"
+#include "attach_wait.h"
 
 struct __reg64 {
     uint64_t r_r15;
