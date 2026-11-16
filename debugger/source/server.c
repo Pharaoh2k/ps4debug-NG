@@ -21,11 +21,7 @@ void free_client(struct server_client *svc) {
     svc->id = 0;
     sceNetSocketClose(svc->fd);
 
-    if (svc->debugging) {
-        scePthreadMutexLock(&g_debug_mutex);
-        debug_full_teardown(svc);
-        scePthreadMutexUnlock(&g_debug_mutex);
-    }
+    debug_client_disconnect(svc);
 
     long slot = svc - servclients;
     if (slot >= 0 && slot < SERVER_MAXCLIENTS) {

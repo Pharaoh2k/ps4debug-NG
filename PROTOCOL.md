@@ -153,16 +153,28 @@ After `PT_ATTACH` the server waits up to about 1 s for `wait4` to report that
 the target has stopped. The attach only succeeds once that stop has been seen
 and `PT_CONTINUE` has resumed the target. If no stop is reported in time, or
 `PT_CONTINUE` fails, the server closes the interrupt socket, replies
-`CMD_ERROR` and calls `PT_DETACH`. If that detach fails, the target is not
-forgotten: the server keeps its pid (it is not a debug session, so all other
-debug commands still reply `CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or
-`CMD_DEBUG_DETACH`, from any client, first collects a pending stop with
-`wait4` and retries `PT_DETACH`. The pid is dropped once the detach succeeds
-or `wait4` shows the target has exited or is no longer traced (`ECHILD`;
-other `wait4` errors keep the pid). Until then,
-`CMD_DEBUG_ATTACH` replies `CMD_ALREADY_DEBUG` and `CMD_DEBUG_DETACH` replies
-`CMD_ERROR`, so the client can simply retry. Teardown (`CMD_DEBUG_DETACH`,
-owner disconnect) also keeps the pid this way when its own `PT_DETACH` fails.
+`CMD_ERROR` and detaches the target.
+
+Detaching (here, in teardown and in the retry below) uses `PT_DETACH`. FreeBSD
+refuses ptrace requests on a traced process that is not stopped (`EBUSY`), so
+on `EBUSY` the server collects a stop that is already there with `wait4`, or
+else sends `SIGSTOP` and waits up to about 1 s for it, then retries
+`PT_DETACH`. A target that is already stopped gets no extra `SIGSTOP`.
+
+If the detach still fails, the target is not forgotten: the server keeps its
+pid (it is not a debug session, so all other debug commands still reply
+`CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH`, from any
+client, first collects a pending stop with `wait4` and retries the detach.
+The pid is dropped once the detach succeeds or `wait4` shows the target has
+exited or is no longer traced (`ECHILD`; other `wait4` errors keep the pid).
+Until then `CMD_DEBUG_ATTACH` replies `CMD_ALREADY_DEBUG` and
+`CMD_DEBUG_DETACH` replies `CMD_ERROR`, so the client can simply retry.
+
+Teardown (`CMD_DEBUG_DETACH`, owner disconnect) keeps the pid the same way
+when its detach fails, and `CMD_DEBUG_DETACH` then replies `CMD_ERROR`. A
+client's disconnect only tears down the session it still owns: the check is
+made under the debug lock, so a session another client has detached and
+replaced in the meantime is left alone.
 
 Do not rely on retrying against older servers: they ignore the extra 4 bytes
 and connect to 755, and on 1.3.x builds before this change a failed
@@ -624,7 +636,8 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 #### `CMD_DEBUG_DETACH = 0xBDBB0002` (kern.c:216-461)
 - **Request body:** none.
 - **Response:** `CMD_SUCCESS`. Clears all breakpoints/watchpoints, resumes target,
-  closes port 755 connection. With no session attached, it retries the
+  closes port 755 connection. `CMD_ERROR` if the target could not be detached
+  and its pid is kept (§1.9). With no session attached, it retries the
   pending detach of an earlier failed attach (§1.9): `CMD_SUCCESS` once
   released, otherwise `CMD_ERROR`.
 

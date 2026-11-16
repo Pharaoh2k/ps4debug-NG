@@ -108,11 +108,32 @@ long g_last_alive_check;
 // detach. g_debug_mutex.
 static int g_orphan_pid;
 
+// PT_DETACH a traced target. FreeBSD refuses ptrace requests (EBUSY) on a
+// traced process that is not stopped, so on EBUSY collect a stop that is
+// already there, or else send SIGSTOP and wait (bounded) for it, then retry.
+// Returns 0 once the target is detached or gone, -1 if it is still traced.
+static int debug_detach_target(int pid) {
+    int status = 0;
+    int spins = 0;
+    if (kern_ptrace(PT_DETACH, pid, 0, 0) >= 0) return 0;
+    if (errno != EBUSY) return -1;
+    int r = wait4(pid, &status, 1 , NULL);
+    if (r == 0 && kill(pid, SIGSTOP) == 0) {
+        while ((r = wait4(pid, &status, 1 , NULL)) == 0 && ++spins <= 1000) {
+            sceKernelUsleep(1000);
+        }
+    }
+    if (r > 0 && attach_wait_stopped(status)) {
+        return kern_ptrace(PT_DETACH, pid, 0, 0) >= 0 ? 0 : -1;
+    }
+    return attach_wait_gone(r, status, errno) ? 0 : -1;
+}
+
 static void debug_retry_orphan(void) {
     int status = 0;
     if (!g_orphan_pid) return;
     int r = wait4(g_orphan_pid, &status, 1 , NULL);
-    if (attach_wait_gone(r, status, errno) || kern_ptrace(PT_DETACH, g_orphan_pid, 0, 0) >= 0) {
+    if (attach_wait_gone(r, status, errno) || debug_detach_target(g_orphan_pid) == 0) {
         g_orphan_pid = 0;
     }
 }
@@ -291,7 +312,7 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     if (wr <= 0 || !attach_wait_stopped(attach_status) ||
         kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
         // Keep a target we could not detach, instead of forgetting it.
-        if (kern_ptrace(PT_DETACH, (int)pid, 0, 0) < 0) {
+        if (debug_detach_target((int)pid) != 0) {
             g_orphan_pid = (int)pid;
         }
         goto fail_close;
@@ -359,7 +380,7 @@ void debug_full_teardown(struct server_client *svc) {
             if (lwpids) free(lwpids);
         }
 
-        if (kern_ptrace(PT_DETACH, g_debug_ctx.pid, 0, 0) < 0) {
+        if (debug_detach_target((int)g_debug_ctx.pid) != 0) {
             g_orphan_pid = (int)g_debug_ctx.pid;
         }
     }
@@ -384,9 +405,21 @@ int debug_detach_handle(int fd, struct cmd_packet *packet) {
         return released ? 0 : 1;
     }
     debug_full_teardown(curdbgcli);
+    int detached = !g_orphan_pid;   // teardown keeps the pid if PT_DETACH failed
     scePthreadMutexUnlock(&g_debug_mutex);
-    net_send_int32(fd, CMD_SUCCESS);
-    return 0;
+    net_send_int32(fd, detached ? CMD_SUCCESS : CMD_ERROR);
+    return detached ? 0 : 1;
+}
+
+// Client disconnect: tear down the session only if this client still owns
+// it. Checked under the lock, so a session another client has detached and
+// replaced in the meantime is left alone.
+void debug_client_disconnect(struct server_client *svc) {
+    scePthreadMutexLock(&g_debug_mutex);
+    if (svc->debugging && curdbgcli == svc) {
+        debug_full_teardown(svc);
+    }
+    scePthreadMutexUnlock(&g_debug_mutex);
 }
 
 int dispatch_debug_events(void) {
