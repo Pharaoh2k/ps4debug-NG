@@ -59,6 +59,8 @@ static struct fproc procs[NPROC];
 static long long now_us;
 static int fake_errno;
 static int wait4_fail_errno;   // next wait4 fails with this errno (once)
+static int detach_busy_left;   // the next N PT_DETACH calls fail with EBUSY
+                               // even on a stopped target (fault injection)
 static int lenient_continue;   // PT_CONTINUE also works on a running target
                                // (not FreeBSD; models an unverified kernel)
 static int lock_held;
@@ -87,8 +89,12 @@ static struct fproc *add_proc(int pid, long long stop_delay_us) {
     return NULL;
 }
 
+// A queued SIGSTOP only takes effect on a running target. FreeBSD leaves a
+// SIGSTOP sent to an already stopped traced process queued (kern_sig.c,
+// tdsendsignal: "traced process is already stopped ... goto out"), so it
+// fires once the process runs again; after PT_DETACH that is an untraced stop.
 static void settle(struct fproc *p) {
-    if (p->stop_pending && now_us >= p->stop_due) {
+    if (p->stop_pending && !p->stopped && now_us >= p->stop_due) {
         p->stop_pending = 0;
         p->stop_due = NEVER;
         p->stopped = 1;
@@ -131,6 +137,7 @@ static int fake_ptrace(int op, int pid, void *addr, int data) {
     case PT_GETNUMLWPS:
     case PT_GETLWPLIST:
         if (!p->traced) return fail(EPERM);
+        if (op == PT_DETACH && detach_busy_left > 0) { detach_busy_left--; return fail(EBUSY); }
         if (!p->stopped || !p->collected) return fail(EBUSY);
         if (op == PT_GETNUMLWPS) return 1;
         if (op == PT_GETLWPLIST) { ((uint32_t *)addr)[0] = (uint32_t)pid * 10; return 1; }
@@ -281,6 +288,7 @@ static void reset(void) {
     fake_errno = 0;
     wait4_fail_errno = 0;
     lenient_continue = 0;
+    detach_busy_left = 0;
     lock_held = 0;
     unlocked_kernel_calls = 0;
     lock_hook = NULL;
@@ -497,7 +505,54 @@ static void test_retry_after_sigcont(void) {
     CHECK(unlocked_kernel_calls == 0 && !lock_held);
 }
 
+// SIGSTOP lands but the PT_DETACH after it fails: the target stays stopped
+// (stop collected) and kept. Retries must not send it another SIGSTOP, must
+// not wait for a stop that will never be reported again, and must release it
+// once PT_DETACH works.
+static void test_detach_fails_after_stop(void) {
+    reset();
+    add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    proc(100)->stop_delay_us = 10000;
+    detach_busy_left = 2;          // first try (running) + the one after the stop
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(g_orphan_pid == 100 && proc(100)->traced);
+    CHECK(proc(100)->stopped && proc(100)->collected && proc(100)->sigstops == 1);
+
+    // Retry while PT_DETACH still fails: no new SIGSTOP, no long wait.
+    detach_busy_left = 1;
+    long long t0 = now_us;
+    CHECK(detach(&cli_b) == CMD_ERROR);
+    CHECK(g_orphan_pid == 100 && proc(100)->sigstops == 1);
+    CHECK(!proc(100)->stop_pending && now_us - t0 < 10000);
+
+    // Retry once PT_DETACH works: released, nothing left queued.
+    CHECK(detach(&cli_b) == CMD_SUCCESS);
+    CHECK(!proc(100)->traced && g_orphan_pid == 0 && proc(100)->sigstops == 1);
+    CHECK(proc(100)->detached_with_stop_pending == 0);
+    CHECK(unlocked_kernel_calls == 0 && !lock_held);
+}
+
+// Teardown of a target already stopped at a breakpoint whose PT_DETACH fails:
+// it is already stopped, so no SIGSTOP; the pid is kept and released later.
+static void test_teardown_stopped_detach_fails(void) {
+    reset();
+    add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    hit_breakpoint(100);
+    detach_busy_left = 1;
+    long long t0 = now_us;
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(g_orphan_pid == 100 && proc(100)->sigstops == 0);
+    CHECK(!proc(100)->stop_pending && now_us - t0 < 10000);
+    CHECK(detach(&cli_b) == CMD_SUCCESS);
+    CHECK(!proc(100)->traced && proc(100)->sigstops == 0);
+    CHECK(proc(100)->detached_with_stop_pending == 0);
+}
+
 int main(void) {
+    test_detach_fails_after_stop();
+    test_teardown_stopped_detach_fails();
     test_disconnect_race();
     test_disconnect_not_owner();
     test_attach_needs_stop();

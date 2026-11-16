@@ -111,6 +111,8 @@ static int g_orphan_pid;
 // PT_DETACH a traced target. FreeBSD refuses ptrace requests (EBUSY) on a
 // traced process that is not stopped, so on EBUSY collect a stop that is
 // already there, or else send SIGSTOP and wait (bounded) for it, then retry.
+// No SIGSTOP if the target is already stopped with its stop collected
+// (PT_GETNUMLWPS only succeeds then): the stop would not be reported again.
 // Returns 0 once the target is detached or gone, -1 if it is still traced.
 static int debug_detach_target(int pid) {
     int status = 0;
@@ -118,7 +120,7 @@ static int debug_detach_target(int pid) {
     if (kern_ptrace(PT_DETACH, pid, 0, 0) >= 0) return 0;
     if (errno != EBUSY) return -1;
     int r = wait4(pid, &status, 1 , NULL);
-    if (r == 0 && kill(pid, SIGSTOP) == 0) {
+    if (r == 0 && kern_ptrace(PT_GETNUMLWPS, pid, 0, 0) < 0 && kill(pid, SIGSTOP) == 0) {
         while ((r = wait4(pid, &status, 1 , NULL)) == 0 && ++spins <= 1000) {
             sceKernelUsleep(1000);
         }
