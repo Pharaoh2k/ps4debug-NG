@@ -400,17 +400,21 @@ int dispatch_debug_events(void) {
     struct debug_interrupt_packet pkt;
     memset(&pkt, 0, sizeof(pkt));
 
-    uint8_t lwpi[152];
+    struct ptrace_lwpinfo lwpi;
     errno = 0;
-    kern_ptrace(13 , (int)g_debug_ctx.pid, lwpi, (int)sizeof(lwpi));
+    kern_ptrace(PT_LWPINFO, (int)g_debug_ctx.pid, &lwpi, (int)sizeof(lwpi));
     if (errno != 0) {
         return 0;
     }
 
-    uint32_t lwpid = *(uint32_t *)lwpi;
+    uint32_t lwpid = lwpi.pl_lwpid;
     pkt.lwpid  = lwpid;
     pkt.status = (uint32_t)status;
-    memcpy(pkt.tdname, lwpi + 0x80, sizeof(pkt.tdname));
+    // pl_tdname (24 bytes) is shorter than tdname (40); pkt was zeroed above,
+    // so the rest of tdname stays NUL. Copying sizeof(pkt.tdname) here used to
+    // read 16 bytes past the end of the lwpinfo buffer.
+    _Static_assert(sizeof(lwpi.pl_tdname) <= sizeof(pkt.tdname), "tdname too small");
+    memcpy(pkt.tdname, lwpi.pl_tdname, sizeof(lwpi.pl_tdname));
 
     kern_ptrace(PT_GETREGS,   (int)lwpid, &pkt.reg64,   0);
     kern_ptrace(PT_GETFPREGS, (int)lwpid, &pkt.savefpu, 0);
