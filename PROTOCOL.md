@@ -159,23 +159,32 @@ Releasing a target (here, in teardown and in the retry below) is done while
 it is stopped and still traced, because FreeBSD refuses ptrace requests on a
 traced process that is not stopped (`EBUSY`):
 
-1. The original bytes of the session's breakpoints are written back.
-2. The target is brought to a reported stop: a stop already collected is
+1. The target is brought to a reported stop: a stop already collected is
    used as is; otherwise one that `wait4` reports, or else the server sends
    `SIGSTOP` and waits up to about 1 s.
-3. Threads left on a breakpoint (`rip` = address + 1) are moved back to the
-   breakpoint. If any were, the target is resumed once so a trap still queued
-   on another thread is reported to the server (not to the released game),
-   and step 2 runs again (at most 8 rounds).
+2. For each breakpoint of the session still in place, threads that ran its
+   `int3` (`rip` = address + 1) are moved back onto it, its original byte is
+   written back, and it is marked done. Nothing ran since the `int3` was
+   there, so those threads did run it; a breakpoint that is done is never
+   touched again, because once the target runs, address + 1 can be a real
+   instruction boundary (e.g. after a one-byte `push`).
+3. If a thread was moved, or the stop was the debugger's own trap, the target
+   is resumed once so a trap still queued on another thread is reported to
+   the server (not to the released game), and step 1 runs again (at most 8
+   rounds).
 4. Every thread's debug registers are cleared (watchpoints).
 5. `PT_DETACH`.
 
 Every step's result is checked. A `SIGSTOP` sent by the server, or queued by
 `PT_ATTACH`, counts as outstanding until a `SIGSTOP` stop is reported; the
 target is never released while it is, so it cannot stop again untraced.
-Other stops seen meanwhile are resumed: `SIGTRAP` (breakpoints, watchpoints,
-steps) is the debugger's own and is dropped, any other signal is passed on
-with that `PT_CONTINUE` or with `PT_DETACH`. No `SIGCONT` is sent. An outside
+Other stops seen meanwhile are resumed and their signals passed on with that
+`PT_CONTINUE` or with `PT_DETACH`, except a `SIGTRAP` the debugger may have
+caused: when releasing a session (its breakpoints, watchpoints or a step
+still in flight), a `SIGTRAP` is taken as the debugger's own and dropped,
+since it cannot be told apart from one the game raises itself. After a
+failed attach nothing of the debugger's exists yet, so a `SIGTRAP` there is
+the game's and is passed on. No `SIGCONT` is sent. An outside
 `SIGSTOP` reported while the server's own is outstanding cannot be told apart
 from it; the target then stops again after release, as that sender asked.
 

@@ -38,7 +38,7 @@ static void say(const char *s) { write(2, s, strlen(s)); }
 
 #define NEVER     0x7fffffffffffLL
 #define NPROC     4
-#define NLWP      2
+#define NLWP      3
 #define SIGUSR1_  30              // FreeBSD SIGUSR1: an outside signal
 
 struct fproc {
@@ -75,6 +75,12 @@ struct fproc {
     int  detached_with_queued_trap;  // queued trap kills it untraced
     int  detached_with_bp_bytes;     // int3 left in its code
     int  ran_mid_instruction;        // resumed a thread at breakpoint + 1
+    int  legit_at_bp1[NLWP];         // got to breakpoint + 1 by running the
+                                     // restored instruction (not via int3)
+    int  ran_twice;                  // such a thread was moved back: the
+                                     // instruction would run twice
+    int  lwp1_runs_restored_insn;    // on the next resume, lwp 1 runs the
+                                     // restored instruction at the breakpoint
 };
 
 static struct fproc procs[NPROC];
@@ -114,6 +120,7 @@ static struct fproc *add_proc(int pid, long long stop_delay_us) {
             procs[i].nlwp = 1;
             procs[i].rip[0] = 0x400000;
             procs[i].rip[1] = 0x400100;
+            procs[i].rip[2] = 0x400200;
             return &procs[i];
         }
     }
@@ -182,7 +189,12 @@ static int need_stopped(struct fproc *p) {
 
 static int resume(struct fproc *p, int data, int detach) {
     for (int i = 0; i < p->nlwp; i++) {
-        if (p->bp_addr && p->rip[i] == p->bp_addr + 1) p->ran_mid_instruction++;
+        if (p->bp_addr && p->rip[i] == p->bp_addr + 1 && !p->legit_at_bp1[i]) p->ran_mid_instruction++;
+    }
+    if (!detach && p->lwp1_runs_restored_insn && p->bp_restored) {
+        p->lwp1_runs_restored_insn = 0;
+        p->rip[1] = p->bp_addr + 1;           // a one-byte instruction ran
+        p->legit_at_bp1[1] = 1;
     }
     if (data) {
         if (p->ndelivered < 8) p->delivered[p->ndelivered] = data;
@@ -233,6 +245,7 @@ static int fake_ptrace(int op, int pid, void *addr, int data) {
             ((struct __reg64 *)addr)->r_rip = p->rip[i];
         } else if (op == PT_SETREGS) {
             if (setregs_fail_left > 0) { setregs_fail_left--; return fail(EIO); }
+            if (p->legit_at_bp1[i] && p->rip[i] != ((struct __reg64 *)addr)->r_rip) p->ran_twice++;
             p->rip[i] = ((struct __reg64 *)addr)->r_rip;
         } else {
             if (setdbregs_fail_left > 0) { setdbregs_fail_left--; return fail(EIO); }
@@ -536,7 +549,10 @@ static void test_detach_paths(void) {
     proc(100)->collected = 0;
     proc(100)->stop_sig = SIGTRAP;
     CHECK(detach(&cli_a) == CMD_SUCCESS);
-    CHECK(!proc(100)->traced && proc(100)->sigstops == 0);
+    // That stop was a trap, so the target is resumed and stopped once more
+    // (another thread may have the same trap queued): one SIGSTOP of ours,
+    // reported before release.
+    CHECK(!proc(100)->traced && proc(100)->sigstops == 1);
     CHECK(proc(100)->detached_with_stop_pending == 0);
 
     // The detach fails: the stop never comes. The pid is kept, DETACH says
@@ -763,7 +779,7 @@ static void test_stop_between_wait_and_probe(void) {
     p->stop_at_probe = 1;
     p->probe_sig = SIGTRAP;
     CHECK(detach(&cli_a) == CMD_SUCCESS);
-    CHECK(released_cleanly(p) && p->sigstops == 1);
+    CHECK(released_cleanly(p) && p->sigstops == 2);   // + one flush round
     CHECK(delivered_count(p, SIGTRAP) == 0);
 
     reset();
@@ -888,6 +904,23 @@ static void test_cleanup_failures(void) {
     CHECK(detach(&cli_b) == CMD_SUCCESS);
     CHECK(released_cleanly(p) && delivered_count(p, SIGUSR1_) == 1);
 
+    // Watchpoint clear fails after the breakpoint was removed and the target
+    // resumed once; meanwhile another thread ran the restored instruction and
+    // is at breakpoint + 1 for real. The retry must not move it back.
+    reset();
+    p = session_with_bp(&cli_a, 100);
+    p->nlwp = 3;
+    hit_breakpoint(100);
+    p->rip[0] = BP + 1;
+    p->lwp1_runs_restored_insn = 1;
+    p->dbregs[2] = 1;
+    setdbregs_fail_left = 1;
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(p->traced && g_orphan_pid == 100 && !g_orphan_bp[0].enabled);
+    CHECK(p->rip[1] == BP + 1);
+    CHECK(detach(&cli_b) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->ran_twice == 0 && p->rip[1] == BP + 1);
+
     // Disconnect of the owner with a failing cleanup keeps it the same way.
     reset();
     p = session_with_bp(&cli_a, 100);
@@ -899,7 +932,66 @@ static void test_cleanup_failures(void) {
     CHECK(unlocked_kernel_calls == 0 && !lock_held);
 }
 
+// ---- SIGTRAP ownership and breakpoint removal (review of 3eb79e1) ---------
+
+// A failed attach: no breakpoint, watchpoint or step exists yet, so a SIGTRAP
+// is the game's own and must reach it, not be dropped as the debugger's.
+static void test_failed_attach_passes_game_sigtrap(void) {
+    reset();
+    struct fproc *p = add_proc(100, 50000);  // PT_ATTACH's SIGSTOP lands late
+    p->ext_sig = SIGTRAP;                     // the game traps first
+    p->ext_due = 10000;
+    continue_fail_left = 1;                   // attach fails after that stop
+    CHECK(attach(&cli_a, 100) == CMD_ERROR);
+    CHECK(!g_debug_ctx.attached && g_orphan_pid == 0);
+    CHECK(!p->traced && delivered_count(p, SIGTRAP) == 1);
+    CHECK(p->detached_with_stop_pending == 0);
+
+    // Same when the release is only finished by a later retry.
+    reset();
+    p = add_proc(100, NEVER);
+    CHECK(attach(&cli_a, 100) == CMD_ERROR);  // never stops: kept
+    CHECK(g_orphan_pid == 100 && g_orphan_own_traps == 0);
+    p->ext_sig = SIGTRAP;
+    p->ext_due = now_us;
+    p->stop_due = now_us + 20000;             // our SIGSTOP lands after it
+    CHECK(detach(&cli_b) == CMD_SUCCESS);
+    CHECK(!p->traced && delivered_count(p, SIGTRAP) == 1);
+    CHECK(p->detached_with_stop_pending == 0);
+}
+
+// Stopped at a breakpoint hit by three threads: one reported, two with the
+// trap still queued. Every queued trap must be reported to us before release.
+static void test_release_two_queued_traps(void) {
+    reset();
+    struct fproc *p = session_with_bp(&cli_a, 100);
+    p->nlwp = 3;
+    hit_breakpoint(100);
+    p->rip[0] = p->rip[1] = p->rip[2] = BP + 1;
+    p->queued_trap[1] = p->queued_trap[2] = 1;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p));
+    CHECK(delivered_count(p, SIGTRAP) == 0);
+}
+
+// After the breakpoint byte is back and the target ran, a thread can be at
+// breakpoint + 1 for real (one-byte instruction, e.g. push rbp). It must not
+// be moved back, or that instruction runs twice.
+static void test_no_rewind_after_running(void) {
+    reset();
+    struct fproc *p = session_with_bp(&cli_a, 100);
+    hit_breakpoint(100);
+    p->rip[0] = BP + 1;                       // ran our int3
+    p->lwp1_runs_restored_insn = 1;           // lwp 1 runs the real one later
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->rip[0] == BP);
+    CHECK(p->ran_twice == 0 && p->rip[1] == BP + 1);
+}
+
 int main(void) {
+    test_failed_attach_passes_game_sigtrap();
+    test_release_two_queued_traps();
+    test_no_rewind_after_running();
     test_release_running_with_watchpoints();
     test_release_queued_trap();
     test_stop_between_wait_and_probe();

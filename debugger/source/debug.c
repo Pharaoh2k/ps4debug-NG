@@ -111,13 +111,18 @@ long g_last_alive_check;
 static int g_orphan_pid;
 static int g_orphan_stop_req;
 static int g_orphan_sig;
+static int g_orphan_own_traps;
 static struct debug_bp g_orphan_bp[MAX_BPS];
-static const struct debug_bp g_no_bps[MAX_BPS];
+static struct debug_bp g_no_bps[MAX_BPS];
 
-// Rewind threads that ran a breakpoint's int3 (rip == address + 1) back to the
-// breakpoint, whose original byte is restored. Target stopped. Returns how many
-// threads were rewound, or -1 if a request failed.
-static int debug_rewind_bp_threads(int pid, const struct debug_bp *bps) {
+// Target stopped. For each breakpoint still in place: move the threads that
+// ran its int3 (rip == address + 1) back onto it, write the original byte
+// back, and mark it done. Nothing has run since the int3 was there, so those
+// threads did run it; once a breakpoint is done it is never touched again,
+// because after the target runs, address + 1 can be a real instruction
+// boundary (e.g. after a one-byte push). Returns how many threads were moved,
+// or -1 if a request failed (breakpoints not done are retried).
+static int debug_remove_bps(int pid, struct debug_bp *bps) {
     int n = 0;
     for (int b = 0; b < MAX_BPS; b++) n += bps[b].enabled != 0;
     if (n == 0) return 0;
@@ -125,22 +130,24 @@ static int debug_rewind_bp_threads(int pid, const struct debug_bp *bps) {
     int numlwps = kern_ptrace(PT_GETNUMLWPS, pid, 0, 0);
     if (numlwps <= 0) return -1;
     uint32_t *lwpids = (uint32_t *)net_alloc_buffer((size_t)numlwps * sizeof(uint32_t));
-    int rewound = 0;
+    int moved = 0;
     int ok = lwpids && kern_ptrace(PT_GETLWPLIST, pid, lwpids, numlwps) >= 0;
-    for (int i = 0; ok && i < numlwps; i++) {
-        struct __reg64 regs;
-        ok = kern_ptrace(PT_GETREGS, (int)lwpids[i], &regs, 0) >= 0;
-        for (int b = 0; ok && b < MAX_BPS; b++) {
-            if (bps[b].enabled && regs.r_rip == bps[b].address + 1) {
+    for (int b = 0; ok && b < MAX_BPS; b++) {
+        if (!bps[b].enabled) continue;
+        for (int i = 0; ok && i < numlwps; i++) {
+            struct __reg64 regs;
+            ok = kern_ptrace(PT_GETREGS, (int)lwpids[i], &regs, 0) >= 0;
+            if (ok && regs.r_rip == bps[b].address + 1) {
                 regs.r_rip = bps[b].address;
                 ok = kern_ptrace(PT_SETREGS, (int)lwpids[i], &regs, 0) >= 0;
-                rewound++;
-                break;
+                moved++;
             }
         }
+        if (ok) ok = sys_proc_rw(pid, bps[b].address, &bps[b].saved_byte, 1, 1) == 0;
+        if (ok) bps[b].enabled = 0;
     }
     if (lwpids) free(lwpids);
-    return ok ? rewound : -1;
+    return ok ? moved : -1;
 }
 
 // Zero every thread's debug registers (clears watchpoints). Target stopped.
@@ -162,11 +169,14 @@ static int debug_clear_dbregs(int pid) {
 // *stop_req: our own SIGSTOP (sent here, or queued by PT_ATTACH) has not been
 // reported yet. While it is outstanding the target must not be released, or
 // the queued SIGSTOP would stop it again untraced, so other stops are resumed
-// until it is reported. Their signals are not swallowed: SIGTRAP is the
-// debugger's own (breakpoints, watchpoints, steps) and is dropped; any other
-// signal is kept in *sig and passed on by the next PT_CONTINUE or PT_DETACH.
+// until it is reported. Their signals are not swallowed: a SIGTRAP is dropped
+// only if the debugger may have caused it (own_traps: a session had
+// breakpoints, watchpoints or steps; a failed attach had none), setting
+// *trapped; any other signal is kept in *sig and passed on by the next
+// PT_CONTINUE or PT_DETACH.
 // Returns 1 when stopped, 0 when the target is gone, -1 on failure (bounded).
-static int debug_wait_stop(int pid, const struct debug_bp *bps, int *stop_req, int *sig) {
+static int debug_wait_stop(int pid, struct debug_bp *bps, int own_traps,
+                           int *stop_req, int *sig, int *trapped) {
     int sent = 0;
     for (int spins = 0; spins <= 1000; spins++) {
         int status = 0;
@@ -180,11 +190,13 @@ static int debug_wait_stop(int pid, const struct debug_bp *bps, int *stop_req, i
                 // Ours. An outside SIGSTOP merged with it leaves the target
                 // stopped after release, which is what its sender asked for.
                 *stop_req = 0;
-            } else if (s != SIGTRAP) {
+            } else if (s == SIGTRAP && own_traps) {
+                *trapped = 1;
+            } else {
                 *sig = s;
             }
             if (!*stop_req) return 1;
-            if (debug_rewind_bp_threads(pid, bps) < 0 ||
+            if (debug_remove_bps(pid, bps) < 0 ||
                 kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) {
                 return -1;
             }
@@ -195,7 +207,7 @@ static int debug_wait_stop(int pid, const struct debug_bp *bps, int *stop_req, i
             // Stopped with the stop already collected (PT_GETNUMLWPS works).
             if (!*stop_req) return 1;
             // Our SIGSTOP is still queued behind this stop: let it land.
-            if (debug_rewind_bp_threads(pid, bps) < 0 ||
+            if (debug_remove_bps(pid, bps) < 0 ||
                 kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) {
                 return -1;
             }
@@ -213,26 +225,21 @@ static int debug_wait_stop(int pid, const struct debug_bp *bps, int *stop_req, i
 }
 
 // Release a traced target. All cleanup runs while it is stopped and still
-// traced: restore the breakpoint bytes, rewind threads left on a breakpoint
-// and let them run on so a queued trap is reported to us (stopping the target
-// again after each resume), clear the watchpoints, then PT_DETACH passing on
-// any signal still owed. Returns 0 once released or gone, -1 if the target is
-// still traced; *stop_req and *sig then say what a retry must resolve.
-static int debug_release_target(int pid, const struct debug_bp *bps, int *stop_req, int *sig) {
-    int restored = 1;
-    for (int b = 0; b < MAX_BPS; b++) {
-        if (bps[b].enabled &&
-            sys_proc_rw(pid, bps[b].address, (void *)&bps[b].saved_byte, 1, 1) != 0) {
-            restored = 0;
-        }
-    }
+// traced: remove the breakpoints (debug_remove_bps), and while a thread was
+// moved off a breakpoint or the last stop was the debugger's own trap, resume
+// it once so a trap still queued on another thread is reported to us, and
+// stop it again; then clear the watchpoints and PT_DETACH, passing on any
+// signal still owed. Returns 0 once released or gone, -1 if the target is
+// still traced; *stop_req, *sig and bps then say what a retry must resolve.
+static int debug_release_target(int pid, struct debug_bp *bps, int own_traps,
+                                int *stop_req, int *sig) {
     for (int round = 0; round < 8; round++) {
-        int st = debug_wait_stop(pid, bps, stop_req, sig);
+        int trapped = 0;
+        int st = debug_wait_stop(pid, bps, own_traps, stop_req, sig, &trapped);
         if (st <= 0) return st == 0 ? 0 : -1;
-        if (!restored) return -1;
-        int rewound = debug_rewind_bp_threads(pid, bps);
-        if (rewound < 0) return -1;
-        if (rewound == 0) {
+        int moved = debug_remove_bps(pid, bps);
+        if (moved < 0) return -1;
+        if (moved == 0 && !trapped) {
             if (debug_clear_dbregs(pid) != 0 ||
                 kern_ptrace(PT_DETACH, pid, 0, *sig) < 0) {
                 return -1;
@@ -246,19 +253,23 @@ static int debug_release_target(int pid, const struct debug_bp *bps, int *stop_r
     return -1;
 }
 
-// Release a target, or keep it (with its breakpoints) for a later retry.
-static void debug_release_or_keep(int pid, const struct debug_bp *bps, int stop_req, int sig) {
-    if (debug_release_target(pid, bps, &stop_req, &sig) != 0) {
-        g_orphan_pid      = pid;
-        g_orphan_stop_req = stop_req;
-        g_orphan_sig      = sig;
+// Release a target, or keep it (with the breakpoints not removed yet) for a
+// later retry.
+static void debug_release_or_keep(int pid, struct debug_bp *bps, int own_traps,
+                                  int stop_req, int sig) {
+    if (debug_release_target(pid, bps, own_traps, &stop_req, &sig) != 0) {
+        g_orphan_pid       = pid;
+        g_orphan_stop_req  = stop_req;
+        g_orphan_sig       = sig;
+        g_orphan_own_traps = own_traps;
         memcpy(g_orphan_bp, bps, sizeof(g_orphan_bp));
     }
 }
 
 static void debug_retry_orphan(void) {
     if (g_orphan_pid &&
-        debug_release_target(g_orphan_pid, g_orphan_bp, &g_orphan_stop_req, &g_orphan_sig) == 0) {
+        debug_release_target(g_orphan_pid, g_orphan_bp, g_orphan_own_traps,
+                             &g_orphan_stop_req, &g_orphan_sig) == 0) {
         g_orphan_pid = 0;
     }
 }
@@ -437,9 +448,10 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     if (wr <= 0 || !attach_wait_stopped(attach_status) ||
         kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
         // PT_ATTACH queued a SIGSTOP: it stays our stop request until reported.
+        // No breakpoint, watchpoint or step exists yet, so a SIGTRAP here is
+        // the game's own and is passed on like any other signal.
         int s = (wr > 0 && attach_wait_stopped(attach_status)) ? (attach_status >> 8) & 0xff : 0;
-        debug_release_or_keep((int)pid, g_no_bps, s != SIGSTOP,
-                              (s == SIGSTOP || s == SIGTRAP) ? 0 : s);
+        debug_release_or_keep((int)pid, g_no_bps, 0, s != SIGSTOP, s == SIGSTOP ? 0 : s);
         goto fail_close;
     }
 
@@ -477,7 +489,7 @@ void debug_full_teardown(struct server_client *svc) {
     if (alive) {
         // Release it (breakpoints, watchpoints, detach) while it is stopped and
         // traced; if that fails, keep it and its breakpoints for a retry.
-        debug_release_or_keep((int)g_debug_ctx.pid, g_debug_ctx.bp, 0, 0);
+        debug_release_or_keep((int)g_debug_ctx.pid, g_debug_ctx.bp, 1, 0, 0);
     }
 
     if (svc && svc->dbgctx.dbgfd > 0) {
