@@ -153,25 +153,44 @@ After `PT_ATTACH` the server waits up to about 1 s for `wait4` to report that
 the target has stopped. The attach only succeeds once that stop has been seen
 and `PT_CONTINUE` has resumed the target. If no stop is reported in time, or
 `PT_CONTINUE` fails, the server closes the interrupt socket, replies
-`CMD_ERROR` and detaches the target.
+`CMD_ERROR` and releases the target (below).
 
-Detaching (here, in teardown and in the retry below) uses `PT_DETACH`. FreeBSD
-refuses ptrace requests on a traced process that is not stopped (`EBUSY`), so
-on `EBUSY` the server collects a stop that is already there with `wait4`, or
-else sends `SIGSTOP` and waits up to about 1 s for it, then retries
-`PT_DETACH`. A target that is already stopped gets no extra `SIGSTOP`.
+Releasing a target (here, in teardown and in the retry below) is done while
+it is stopped and still traced, because FreeBSD refuses ptrace requests on a
+traced process that is not stopped (`EBUSY`):
 
-If the detach still fails, the target is not forgotten: the server keeps its
-pid (it is not a debug session, so all other debug commands still reply
-`CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH`, from any
-client, first collects a pending stop with `wait4` and retries the detach.
-The pid is dropped once the detach succeeds or `wait4` shows the target has
-exited or is no longer traced (`ECHILD`; other `wait4` errors keep the pid).
-Until then `CMD_DEBUG_ATTACH` replies `CMD_ALREADY_DEBUG` and
-`CMD_DEBUG_DETACH` replies `CMD_ERROR`, so the client can simply retry.
+1. The original bytes of the session's breakpoints are written back.
+2. The target is brought to a reported stop: a stop already collected is
+   used as is; otherwise one that `wait4` reports, or else the server sends
+   `SIGSTOP` and waits up to about 1 s.
+3. Threads left on a breakpoint (`rip` = address + 1) are moved back to the
+   breakpoint. If any were, the target is resumed once so a trap still queued
+   on another thread is reported to the server (not to the released game),
+   and step 2 runs again (at most 8 rounds).
+4. Every thread's debug registers are cleared (watchpoints).
+5. `PT_DETACH`.
+
+Every step's result is checked. A `SIGSTOP` sent by the server, or queued by
+`PT_ATTACH`, counts as outstanding until a `SIGSTOP` stop is reported; the
+target is never released while it is, so it cannot stop again untraced.
+Other stops seen meanwhile are resumed: `SIGTRAP` (breakpoints, watchpoints,
+steps) is the debugger's own and is dropped, any other signal is passed on
+with that `PT_CONTINUE` or with `PT_DETACH`. No `SIGCONT` is sent. An outside
+`SIGSTOP` reported while the server's own is outstanding cannot be told apart
+from it; the target then stops again after release, as that sender asked.
+
+If any step fails, the target is not forgotten: the server keeps its pid,
+its breakpoints, whether its own stop request is outstanding and any signal
+still owed (it is not a debug session, so all other debug commands still
+reply `CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH`,
+from any client, retries the release. The pid is dropped once the release
+succeeds or `wait4` shows the target has exited or is no longer traced
+(`ECHILD`; other `wait4` errors keep the pid). Until then `CMD_DEBUG_ATTACH`
+replies `CMD_ALREADY_DEBUG` and `CMD_DEBUG_DETACH` replies `CMD_ERROR`, so the
+client can simply retry.
 
 Teardown (`CMD_DEBUG_DETACH`, owner disconnect) keeps the pid the same way
-when its detach fails, and `CMD_DEBUG_DETACH` then replies `CMD_ERROR`. A
+when the release fails, and `CMD_DEBUG_DETACH` then replies `CMD_ERROR`. A
 client's disconnect only tears down the session it still owns: the check is
 made under the debug lock, so a session another client has detached and
 replaced in the meantime is left alone.

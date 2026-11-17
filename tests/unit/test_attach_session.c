@@ -38,7 +38,8 @@ static void say(const char *s) { write(2, s, strlen(s)); }
 
 #define NEVER     0x7fffffffffffLL
 #define NPROC     4
-#define STOPPED17 ((17 << 8) | 0x7f)
+#define NLWP      2
+#define SIGUSR1_  30              // FreeBSD SIGUSR1: an outside signal
 
 struct fproc {
     int  pid;
@@ -46,13 +47,34 @@ struct fproc {
     int  traced;
     int  stopped;
     int  collected;     // stop reported by wait4 (FreeBSD P_WAITED)
-    int  stop_pending;  // a SIGSTOP is queued
+    int  stop_sig;      // signal reported for the current stop
+    int  stop_pending;  // a SIGSTOP is queued (ours and/or an outside one)
     long long stop_due; // when the queued SIGSTOP takes effect
     long long stop_delay_us; // delay for SIGSTOP from kill() / PT_ATTACH
+    int  ext_sig;       // an outside signal arriving at ext_due
+    long long ext_due;
+    long long trap_due; // a thread runs the breakpoint's int3 at trap_due
+    int  trap_lwp;
+    int  stop_at_probe; // stop with probe_sig right at the next PT_GETNUMLWPS
+    int  probe_sig;     // (i.e. after wait4 saw nothing, before the probe)
+    int  nlwp;
+    uint64_t rip[NLWP];
+    int  dbregs[NLWP];      // watchpoint armed
+    int  queued_trap[NLWP]; // trap raised but not reported yet
+    uint64_t bp_addr;       // a breakpoint the debugger set (0: none)
+    int  bp_restored;       // its original byte written back
     int  detaches;
-    int  sigstops;
+    int  sigstops;          // SIGSTOPs sent by the debugger (kill)
     int  other_signals;
-    int  detached_with_stop_pending; // would freeze untraced: must stay 0
+    int  delivered[8];      // signals passed on by PT_CONTINUE / PT_DETACH
+    int  ndelivered;
+    int  detach_sig;
+    // Conditions that would hurt the released game; all must stay 0.
+    int  detached_with_stop_pending; // queued SIGSTOP stops it untraced
+    int  detached_with_watchpoints;  // armed watchpoint traps it untraced
+    int  detached_with_queued_trap;  // queued trap kills it untraced
+    int  detached_with_bp_bytes;     // int3 left in its code
+    int  ran_mid_instruction;        // resumed a thread at breakpoint + 1
 };
 
 static struct fproc procs[NPROC];
@@ -61,6 +83,10 @@ static int fake_errno;
 static int wait4_fail_errno;   // next wait4 fails with this errno (once)
 static int detach_busy_left;   // the next N PT_DETACH calls fail with EBUSY
                                // even on a stopped target (fault injection)
+static int rw_fail_left;       // the next N breakpoint byte restores fail
+static int setregs_fail_left;  // the next N PT_SETREGS fail
+static int setdbregs_fail_left;// the next N PT_SETDBREGS fail
+static int continue_fail_left; // the next N PT_CONTINUE fail
 static int lenient_continue;   // PT_CONTINUE also works on a running target
                                // (not FreeBSD; models an unverified kernel)
 static int lock_held;
@@ -82,23 +108,56 @@ static struct fproc *add_proc(int pid, long long stop_delay_us) {
             procs[i].pid = pid;
             procs[i].exists = 1;
             procs[i].stop_due = NEVER;
+            procs[i].ext_due = NEVER;
+            procs[i].trap_due = NEVER;
             procs[i].stop_delay_us = stop_delay_us;
+            procs[i].nlwp = 1;
+            procs[i].rip[0] = 0x400000;
+            procs[i].rip[1] = 0x400100;
             return &procs[i];
         }
     }
     return NULL;
 }
 
-// A queued SIGSTOP only takes effect on a running target. FreeBSD leaves a
-// SIGSTOP sent to an already stopped traced process queued (kern_sig.c,
-// tdsendsignal: "traced process is already stopped ... goto out"), so it
-// fires once the process runs again; after PT_DETACH that is an untraced stop.
+// Lwp ids are pid * 10 + index.
+static struct fproc *lwp(int id, int *idx) {
+    struct fproc *p = proc(id / 10);
+    *idx = id % 10;
+    return p && p->exists && *idx < p->nlwp ? p : NULL;
+}
+
+static void stop_now(struct fproc *p, int sig) {
+    p->stopped = 1;
+    p->collected = 0;
+    p->stop_sig = sig;
+}
+
+// Signals and traps only take effect on a running target, earliest first.
+// FreeBSD leaves a SIGSTOP sent to an already stopped traced process queued
+// (kern_sig.c, tdsendsignal: "traced process is already stopped ... goto
+// out"), so it fires once the process runs again; after PT_DETACH that is an
+// untraced stop.
 static void settle(struct fproc *p) {
-    if (p->stop_pending && !p->stopped && now_us >= p->stop_due) {
+    if (p->stopped) return;
+    long long due = NEVER;
+    int which = 0;
+    if (p->stop_pending && p->stop_due < due) { due = p->stop_due; which = 1; }
+    if (p->ext_sig && p->ext_due < due)       { due = p->ext_due;  which = 2; }
+    if (p->bp_addr && !p->bp_restored && p->trap_due < due) { due = p->trap_due; which = 3; }
+    if (due == NEVER || now_us < due) return;
+    if (which == 1) {
         p->stop_pending = 0;
         p->stop_due = NEVER;
-        p->stopped = 1;
-        p->collected = 0;
+        stop_now(p, SIGSTOP);
+    } else if (which == 2) {
+        stop_now(p, p->ext_sig);
+        p->ext_sig = 0;
+        p->ext_due = NEVER;
+    } else {
+        p->rip[p->trap_lwp] = p->bp_addr + 1;   // ran the int3
+        p->trap_due = NEVER;
+        stop_now(p, SIGTRAP);
     }
 }
 
@@ -114,14 +173,74 @@ static void kernel_call(void) {
     if (!lock_held) unlocked_kernel_calls++;
 }
 
+// The checks FreeBSD's kern_ptrace applies to every request but PT_ATTACH.
+static int need_stopped(struct fproc *p) {
+    if (!p->traced) return fail(EPERM);
+    if (!p->stopped || !p->collected) return fail(EBUSY);
+    return 0;
+}
+
+static int resume(struct fproc *p, int data, int detach) {
+    for (int i = 0; i < p->nlwp; i++) {
+        if (p->bp_addr && p->rip[i] == p->bp_addr + 1) p->ran_mid_instruction++;
+    }
+    if (data) {
+        if (p->ndelivered < 8) p->delivered[p->ndelivered] = data;
+        p->ndelivered++;
+    }
+    p->stopped = 0;
+    p->collected = 0;
+    if (detach) {
+        p->traced = 0;
+        p->detaches++;
+        p->detach_sig = data;
+        if (p->stop_pending) p->detached_with_stop_pending++;
+        if (p->bp_addr && !p->bp_restored) p->detached_with_bp_bytes++;
+        for (int i = 0; i < p->nlwp; i++) {
+            if (p->dbregs[i]) p->detached_with_watchpoints++;
+            if (p->queued_trap[i]) p->detached_with_queued_trap++;
+        }
+        return 0;
+    }
+    // A thread whose trap was queued behind another stop reports it now.
+    for (int i = 0; i < p->nlwp; i++) {
+        if (p->queued_trap[i]) {
+            p->queued_trap[i] = 0;
+            stop_now(p, SIGTRAP);
+            break;
+        }
+    }
+    return 0;
+}
+
 // ---- fake libPS4 / kernel / debugger externals ------------------------------
 
 int *__error(void) { return &fake_errno; }
 
 static int fake_ptrace(int op, int pid, void *addr, int data) {
-    (void)data;
     kernel_call();
-    struct fproc *p = proc(pid);
+    int i;
+    struct fproc *p;
+    switch (op) {
+    case PT_GETREGS:
+    case PT_SETREGS:
+    case PT_SETDBREGS:
+        if (!(p = lwp(pid, &i))) return fail(ESRCH);
+        settle(p);
+        if (need_stopped(p)) return -1;
+        if (op == PT_GETREGS) {
+            memset(addr, 0, sizeof(struct __reg64));
+            ((struct __reg64 *)addr)->r_rip = p->rip[i];
+        } else if (op == PT_SETREGS) {
+            if (setregs_fail_left > 0) { setregs_fail_left--; return fail(EIO); }
+            p->rip[i] = ((struct __reg64 *)addr)->r_rip;
+        } else {
+            if (setdbregs_fail_left > 0) { setdbregs_fail_left--; return fail(EIO); }
+            p->dbregs[i] = 0;
+        }
+        return 0;
+    }
+    p = proc(pid);
     if (!p || !p->exists) return fail(ESRCH);
     settle(p);
     switch (op) {
@@ -130,27 +249,30 @@ static int fake_ptrace(int op, int pid, void *addr, int data) {
         p->traced = 1;
         queue_stop(p);
         return 0;
-    case PT_CONTINUE:
-        if (lenient_continue && p->traced) return 0;
-        // fall through
-    case PT_DETACH:
     case PT_GETNUMLWPS:
-    case PT_GETLWPLIST:
-        if (!p->traced) return fail(EPERM);
-        if (op == PT_DETACH && detach_busy_left > 0) { detach_busy_left--; return fail(EBUSY); }
-        if (!p->stopped || !p->collected) return fail(EBUSY);
-        if (op == PT_GETNUMLWPS) return 1;
-        if (op == PT_GETLWPLIST) { ((uint32_t *)addr)[0] = (uint32_t)pid * 10; return 1; }
-        if (op == PT_DETACH) {
-            p->traced = 0;
-            p->detaches++;
-            if (p->stop_pending) p->detached_with_stop_pending++;
+        if (p->stop_at_probe && !p->stopped) {   // stops right now
+            p->stop_at_probe = 0;
+            if (p->probe_sig == SIGTRAP && p->bp_addr) p->rip[p->trap_lwp] = p->bp_addr + 1;
+            stop_now(p, p->probe_sig);
         }
-        p->stopped = 0;
-        p->collected = 0;
-        return 0;
+        if (need_stopped(p)) return -1;
+        return p->nlwp;
+    case PT_GETLWPLIST:
+        if (need_stopped(p)) return -1;
+        for (int k = 0; k < p->nlwp && k < data; k++) ((uint32_t *)addr)[k] = (uint32_t)(pid * 10 + k);
+        return p->nlwp;
+    case PT_CONTINUE:
+        if (lenient_continue && p->traced && !p->stopped) return 0;
+        if (need_stopped(p)) return -1;
+        if (continue_fail_left > 0) { continue_fail_left--; return fail(EIO); }
+        return resume(p, data, 0);
+    case PT_DETACH:
+        if (!p->traced) return fail(EPERM);
+        if (detach_busy_left > 0) { detach_busy_left--; return fail(EBUSY); }
+        if (need_stopped(p)) return -1;
+        return resume(p, data, 1);
     default:
-        return 0; // PT_SETDBREGS on an lwp, etc.
+        return 0;
     }
 }
 
@@ -179,7 +301,7 @@ int wait4(int pid, int *status, int options, void *rusage) {
     settle(p);
     if (p->stopped && !p->collected) {
         p->collected = 1;
-        *status = STOPPED17;
+        *status = (p->stop_sig << 8) | 0x7f;
         return pid;
     }
     return 0;
@@ -201,6 +323,9 @@ int kill(int pid, int sig) {
     }
     return 0;
 }
+
+// Someone else sends SIGSTOP (merges with one already queued).
+static void outside_sigstop(struct fproc *p) { queue_stop(p); }
 
 static int fake_usleep(unsigned int us) {
     now_us += us;
@@ -265,7 +390,16 @@ int sys_proc_cmd(uint64_t pid, uint64_t cmd, void *data) {
     struct fproc *p = proc((int)pid);
     return p && p->exists ? 0 : 1;
 }
-int sys_proc_rw(uint64_t pid, uint64_t a, void *d, uint64_t l, uint64_t w) { (void)pid; (void)a; (void)d; (void)l; (void)w; return 0; }
+int sys_proc_rw(uint64_t pid, uint64_t a, void *d, uint64_t l, uint64_t w) {
+    (void)d; (void)l;
+    struct fproc *p = proc((int)pid);
+    if (!p || !p->exists) return -1;
+    if (w && p->bp_addr && a == p->bp_addr) {
+        if (rw_fail_left > 0) { rw_fail_left--; return -1; }
+        p->bp_restored = 1;
+    }
+    return 0;
+}
 int sys_console_cmd(uint64_t cmd, void *data) { (void)cmd; (void)data; return 0; }
 int kern_get_fsgsbase(int pid, int lwpid, void *o) { (void)pid; (void)lwpid; (void)o; return 0; }
 int kern_set_fsgsbase(int pid, int lwpid, const void *i) { (void)pid; (void)lwpid; (void)i; return 0; }
@@ -289,12 +423,19 @@ static void reset(void) {
     wait4_fail_errno = 0;
     lenient_continue = 0;
     detach_busy_left = 0;
+    rw_fail_left = 0;
+    setregs_fail_left = 0;
+    setdbregs_fail_left = 0;
+    continue_fail_left = 0;
     lock_held = 0;
     unlocked_kernel_calls = 0;
     lock_hook = NULL;
     open_sockets = 0;
     memset(&g_debug_ctx, 0, sizeof(g_debug_ctx));
     g_orphan_pid = 0;
+    g_orphan_stop_req = 0;
+    g_orphan_sig = 0;
+    memset(g_orphan_bp, 0, sizeof(g_orphan_bp));
     g_debugging = 0;
     curdbgcli = NULL;
     curdbgctx = NULL;
@@ -327,6 +468,7 @@ static void hit_breakpoint(int pid) {
     struct fproc *p = proc(pid);
     p->stopped = 1;
     p->collected = 1;
+    p->stop_sig = SIGTRAP;
 }
 
 // ---- tests -------------------------------------------------------------------
@@ -392,6 +534,7 @@ static void test_detach_paths(void) {
     CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
     proc(100)->stopped = 1;
     proc(100)->collected = 0;
+    proc(100)->stop_sig = SIGTRAP;
     CHECK(detach(&cli_a) == CMD_SUCCESS);
     CHECK(!proc(100)->traced && proc(100)->sigstops == 0);
     CHECK(proc(100)->detached_with_stop_pending == 0);
@@ -550,7 +693,219 @@ static void test_teardown_stopped_detach_fails(void) {
     CHECK(proc(100)->detached_with_stop_pending == 0);
 }
 
+// ---- release: cleanup on a stopped, traced target (review of dbd84b6) ------
+
+#define BP 0x401000ULL
+
+// A session on pid with one breakpoint (original byte 0x55) and two threads.
+static struct fproc *session_with_bp(struct server_client *c, int pid) {
+    struct fproc *p = add_proc(pid, 0);
+    CHECK(attach(c, pid) == CMD_SUCCESS);
+    p->nlwp = 2;
+    p->bp_addr = BP;
+    g_debug_ctx.bp[0].enabled = 1;
+    g_debug_ctx.bp[0].address = BP;
+    g_debug_ctx.bp[0].saved_byte = 0x55;
+    return p;
+}
+
+static int released_cleanly(struct fproc *p) {
+    return !p->traced && p->detaches == 1 &&
+           p->detached_with_stop_pending == 0 && p->detached_with_watchpoints == 0 &&
+           p->detached_with_queued_trap == 0 && p->detached_with_bp_bytes == 0 &&
+           p->ran_mid_instruction == 0;
+}
+
+static int delivered_count(struct fproc *p, int sig) {
+    int n = 0;
+    for (int i = 0; i < p->ndelivered && i < 8; i++) n += p->delivered[i] == sig;
+    return n;
+}
+
+// Watchpoints on a running target: it must be stopped before they are
+// cleared (FreeBSD refuses PT_SETDBREGS on a running target).
+static void test_release_running_with_watchpoints(void) {
+    reset();
+    struct fproc *p = session_with_bp(&cli_a, 100);
+    p->dbregs[0] = p->dbregs[1] = 1;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->bp_restored);
+    CHECK(p->sigstops == 1 && p->ndelivered == 0 && p->detach_sig == 0);
+    CHECK(g_orphan_pid == 0 && unlocked_kernel_calls == 0);
+}
+
+// Stopped at a breakpoint while another thread's trap is still queued: both
+// threads are rewound, the target is resumed so the queued trap is reported
+// to us, and it is stopped again before the watchpoints are cleared and it
+// is detached (the sweep's PT_CONTINUE leaves it running).
+static void test_release_queued_trap(void) {
+    reset();
+    struct fproc *p = session_with_bp(&cli_a, 100);
+    hit_breakpoint(100);
+    p->rip[0] = BP + 1;
+    p->rip[1] = BP + 1;
+    p->queued_trap[1] = 1;
+    p->dbregs[0] = p->dbregs[1] = 1;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p));
+    CHECK(p->rip[0] == BP && p->rip[1] == BP);
+    CHECK(delivered_count(p, SIGTRAP) == 0);     // our own trap, not passed on
+}
+
+// Review case 1: wait4 saw nothing, then the target stopped (here: a
+// watchpoint trap, then an outside signal) right before the probe. Our
+// SIGSTOP is queued behind that stop and must be reported before release.
+static void test_stop_between_wait_and_probe(void) {
+    reset();
+    struct fproc *p = add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    p->stop_delay_us = 30000;
+    p->stop_at_probe = 1;
+    p->probe_sig = SIGTRAP;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->sigstops == 1);
+    CHECK(delivered_count(p, SIGTRAP) == 0);
+
+    reset();
+    p = add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    p->stop_delay_us = 30000;
+    p->stop_at_probe = 1;
+    p->probe_sig = SIGUSR1_;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p));
+    CHECK(delivered_count(p, SIGUSR1_) == 1);    // passed on, not swallowed
+}
+
+// Review case 2: another signal stops the target before our SIGSTOP lands.
+static void test_other_stop_before_sigstop(void) {
+    // An outside signal: passed on, and our SIGSTOP still resolved.
+    reset();
+    struct fproc *p = add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    p->stop_delay_us = 50000;
+    p->ext_sig = SIGUSR1_;
+    p->ext_due = now_us + 10000;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->sigstops == 1);
+    CHECK(delivered_count(p, SIGUSR1_) == 1 && p->detach_sig == 0);
+
+    // A breakpoint trap from a thread that ran the int3 before the byte was
+    // restored: rewound before the target is resumed, trap not passed on.
+    reset();
+    p = session_with_bp(&cli_a, 100);
+    p->stop_delay_us = 50000;
+    p->rip[1] = BP + 1;
+    p->ext_sig = SIGTRAP;
+    p->ext_due = now_us + 10000;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->rip[1] == BP);
+    CHECK(delivered_count(p, SIGTRAP) == 0);
+}
+
+// Outside SIGSTOPs are not swallowed into a lost stop, and ours never stays
+// queued behind a release.
+static void test_outside_sigstop(void) {
+    // Stopped by someone else's SIGSTOP (not collected yet), no request of
+    // ours: no SIGSTOP from us, and the outside one is passed on at detach.
+    reset();
+    struct fproc *p = add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    outside_sigstop(p);
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(!p->traced && p->sigstops == 0 && p->detach_sig == SIGSTOP);
+    CHECK(p->detached_with_stop_pending == 0);
+
+    // An outside SIGSTOP stops it first while ours is still queued. The two
+    // cannot be told apart; ours is treated as reported, so the queued one
+    // stops the target after release, which is what the outside sender asked
+    // for. (Either way the target ends up stopped, never resumed by us.)
+    reset();
+    p = add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    p->stop_delay_us = 50000;
+    p->ext_sig = SIGSTOP;
+    p->ext_due = now_us + 10000;
+    CHECK(detach(&cli_a) == CMD_SUCCESS);
+    CHECK(!p->traced && p->sigstops == 1);
+    CHECK(p->detached_with_stop_pending == 1 || p->detach_sig == SIGSTOP);
+    CHECK(p->other_signals == 0);                // no SIGCONT
+}
+
+// Cleanup failures: nothing is detached with a breakpoint byte, a thread on
+// a breakpoint or an armed watchpoint left; the pid, the breakpoints and the
+// stop state are kept, DETACH says CMD_ERROR, and a retry finishes the job.
+static void test_cleanup_failures(void) {
+    // Watchpoint clear fails.
+    reset();
+    struct fproc *p = session_with_bp(&cli_a, 100);
+    p->dbregs[0] = p->dbregs[1] = 1;
+    setdbregs_fail_left = 1;
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(p->traced && p->detaches == 0 && g_orphan_pid == 100);
+    CHECK(getregs(&cli_b) == CMD_ERROR);         // not a session
+    CHECK(detach(&cli_b) == CMD_SUCCESS);        // retry
+    CHECK(released_cleanly(p) && g_orphan_pid == 0);
+
+    // Breakpoint byte restore fails: kept with its breakpoint, then retried.
+    reset();
+    p = session_with_bp(&cli_a, 100);
+    rw_fail_left = 1;
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(p->traced && p->detaches == 0 && !p->bp_restored);
+    CHECK(g_orphan_pid == 100 && g_orphan_bp[0].enabled && g_orphan_bp[0].address == BP);
+    CHECK(!g_debug_ctx.attached);
+    add_proc(300, 0);
+    CHECK(attach(&cli_b, 300) == CMD_SUCCESS);   // retry first, then attach
+    CHECK(released_cleanly(p) && p->bp_restored && g_orphan_pid == 0);
+
+    // Rewinding a thread off the breakpoint fails: kept, never resumed
+    // mid-instruction, then retried.
+    reset();
+    p = session_with_bp(&cli_a, 100);
+    hit_breakpoint(100);
+    p->rip[0] = BP + 1;
+    setregs_fail_left = 1;
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(p->traced && p->detaches == 0 && p->ran_mid_instruction == 0);
+    CHECK(detach(&cli_b) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && p->rip[0] == BP);
+
+    // An outside signal stops it before our SIGSTOP lands and resuming it
+    // fails: kept stopped with our SIGSTOP queued behind that stop and the
+    // signal still owed. The retry must resume it (passing the signal on)
+    // so our SIGSTOP is reported before release, not detach it as it is.
+    reset();
+    p = add_proc(100, 0);
+    CHECK(attach(&cli_a, 100) == CMD_SUCCESS);
+    p->stop_delay_us = 50000;
+    p->ext_sig = SIGUSR1_;
+    p->ext_due = now_us + 10000;
+    continue_fail_left = 1;
+    CHECK(detach(&cli_a) == CMD_ERROR);
+    CHECK(p->traced && p->stopped && p->stop_pending && g_orphan_pid == 100);
+    CHECK(g_orphan_stop_req == 1 && g_orphan_sig == SIGUSR1_);
+    CHECK(detach(&cli_b) == CMD_SUCCESS);
+    CHECK(released_cleanly(p) && delivered_count(p, SIGUSR1_) == 1);
+
+    // Disconnect of the owner with a failing cleanup keeps it the same way.
+    reset();
+    p = session_with_bp(&cli_a, 100);
+    p->dbregs[0] = 1;
+    setdbregs_fail_left = 1;
+    debug_client_disconnect(&cli_a);
+    CHECK(p->traced && g_orphan_pid == 100 && !g_debug_ctx.attached);
+    CHECK(detach(&cli_b) == CMD_SUCCESS && released_cleanly(p));
+    CHECK(unlocked_kernel_calls == 0 && !lock_held);
+}
+
 int main(void) {
+    test_release_running_with_watchpoints();
+    test_release_queued_trap();
+    test_stop_between_wait_and_probe();
+    test_other_stop_before_sigstop();
+    test_outside_sigstop();
+    test_cleanup_failures();
     test_detach_fails_after_stop();
     test_teardown_stopped_detach_fails();
     test_disconnect_race();

@@ -102,40 +102,163 @@ int g_pending_sig_pid;
 int g_pending_signal;
 long g_last_alive_check;
 
-// A target left traced because PT_DETACH failed (after a failed attach, or in
-// debug_full_teardown). It is not a debug session (g_debug_ctx stays clear),
-// but it is kept so the next CMD_DEBUG_ATTACH or CMD_DEBUG_DETACH retries the
-// detach. g_debug_mutex.
+// A target left traced because it could not be released (after a failed
+// attach, or in debug_full_teardown). It is not a debug session (g_debug_ctx
+// stays clear), but it is kept with what a retry needs: its breakpoints,
+// whether our own stop request is still outstanding, and a signal still owed
+// to it. The next CMD_DEBUG_ATTACH or CMD_DEBUG_DETACH retries the release.
+// g_debug_mutex.
 static int g_orphan_pid;
+static int g_orphan_stop_req;
+static int g_orphan_sig;
+static struct debug_bp g_orphan_bp[MAX_BPS];
+static const struct debug_bp g_no_bps[MAX_BPS];
 
-// PT_DETACH a traced target. FreeBSD refuses ptrace requests (EBUSY) on a
-// traced process that is not stopped, so on EBUSY collect a stop that is
-// already there, or else send SIGSTOP and wait (bounded) for it, then retry.
-// No SIGSTOP if the target is already stopped with its stop collected
-// (PT_GETNUMLWPS only succeeds then): the stop would not be reported again.
-// Returns 0 once the target is detached or gone, -1 if it is still traced.
-static int debug_detach_target(int pid) {
-    int status = 0;
-    int spins = 0;
-    if (kern_ptrace(PT_DETACH, pid, 0, 0) >= 0) return 0;
-    if (errno != EBUSY) return -1;
-    int r = wait4(pid, &status, 1 , NULL);
-    if (r == 0 && kern_ptrace(PT_GETNUMLWPS, pid, 0, 0) < 0 && kill(pid, SIGSTOP) == 0) {
-        while ((r = wait4(pid, &status, 1 , NULL)) == 0 && ++spins <= 1000) {
-            sceKernelUsleep(1000);
+// Rewind threads that ran a breakpoint's int3 (rip == address + 1) back to the
+// breakpoint, whose original byte is restored. Target stopped. Returns how many
+// threads were rewound, or -1 if a request failed.
+static int debug_rewind_bp_threads(int pid, const struct debug_bp *bps) {
+    int n = 0;
+    for (int b = 0; b < MAX_BPS; b++) n += bps[b].enabled != 0;
+    if (n == 0) return 0;
+
+    int numlwps = kern_ptrace(PT_GETNUMLWPS, pid, 0, 0);
+    if (numlwps <= 0) return -1;
+    uint32_t *lwpids = (uint32_t *)net_alloc_buffer((size_t)numlwps * sizeof(uint32_t));
+    int rewound = 0;
+    int ok = lwpids && kern_ptrace(PT_GETLWPLIST, pid, lwpids, numlwps) >= 0;
+    for (int i = 0; ok && i < numlwps; i++) {
+        struct __reg64 regs;
+        ok = kern_ptrace(PT_GETREGS, (int)lwpids[i], &regs, 0) >= 0;
+        for (int b = 0; ok && b < MAX_BPS; b++) {
+            if (bps[b].enabled && regs.r_rip == bps[b].address + 1) {
+                regs.r_rip = bps[b].address;
+                ok = kern_ptrace(PT_SETREGS, (int)lwpids[i], &regs, 0) >= 0;
+                rewound++;
+                break;
+            }
         }
     }
-    if (r > 0 && attach_wait_stopped(status)) {
-        return kern_ptrace(PT_DETACH, pid, 0, 0) >= 0 ? 0 : -1;
+    if (lwpids) free(lwpids);
+    return ok ? rewound : -1;
+}
+
+// Zero every thread's debug registers (clears watchpoints). Target stopped.
+static int debug_clear_dbregs(int pid) {
+    int numlwps = kern_ptrace(PT_GETNUMLWPS, pid, 0, 0);
+    if (numlwps <= 0) return -1;
+    uint32_t *lwpids = (uint32_t *)net_alloc_buffer((size_t)numlwps * sizeof(uint32_t));
+    int ok = lwpids && kern_ptrace(PT_GETLWPLIST, pid, lwpids, numlwps) >= 0;
+    struct __dbreg64 zero = {0};
+    for (int i = 0; ok && i < numlwps; i++) {
+        ok = kern_ptrace(PT_SETDBREGS, (int)lwpids[i], &zero, 0) >= 0;
     }
-    return attach_wait_gone(r, status, errno) ? 0 : -1;
+    if (lwpids) free(lwpids);
+    return ok ? 0 : -1;
+}
+
+// Bring a traced target to a reported stop. FreeBSD refuses ptrace requests
+// (EBUSY) on a traced process that is not stopped with its stop collected.
+// *stop_req: our own SIGSTOP (sent here, or queued by PT_ATTACH) has not been
+// reported yet. While it is outstanding the target must not be released, or
+// the queued SIGSTOP would stop it again untraced, so other stops are resumed
+// until it is reported. Their signals are not swallowed: SIGTRAP is the
+// debugger's own (breakpoints, watchpoints, steps) and is dropped; any other
+// signal is kept in *sig and passed on by the next PT_CONTINUE or PT_DETACH.
+// Returns 1 when stopped, 0 when the target is gone, -1 on failure (bounded).
+static int debug_wait_stop(int pid, const struct debug_bp *bps, int *stop_req, int *sig) {
+    int sent = 0;
+    for (int spins = 0; spins <= 1000; spins++) {
+        int status = 0;
+        int r = wait4(pid, &status, 1 , NULL);
+        if (r < 0 || (r > 0 && !attach_wait_stopped(status))) {
+            return attach_wait_gone(r, status, errno) ? 0 : -1;
+        }
+        if (r > 0) {
+            int s = (status >> 8) & 0xff;
+            if (s == SIGSTOP && *stop_req) {
+                // Ours. An outside SIGSTOP merged with it leaves the target
+                // stopped after release, which is what its sender asked for.
+                *stop_req = 0;
+            } else if (s != SIGTRAP) {
+                *sig = s;
+            }
+            if (!*stop_req) return 1;
+            if (debug_rewind_bp_threads(pid, bps) < 0 ||
+                kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) {
+                return -1;
+            }
+            *sig = 0;
+            continue;
+        }
+        if (kern_ptrace(PT_GETNUMLWPS, pid, 0, 0) >= 0) {
+            // Stopped with the stop already collected (PT_GETNUMLWPS works).
+            if (!*stop_req) return 1;
+            // Our SIGSTOP is still queued behind this stop: let it land.
+            if (debug_rewind_bp_threads(pid, bps) < 0 ||
+                kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) {
+                return -1;
+            }
+            *sig = 0;
+        } else if (!sent) {
+            // Running: ask it to stop. A SIGSTOP still queued from an earlier
+            // request merges with this one; one cancelled by SIGCONT is renewed.
+            if (kill(pid, SIGSTOP) < 0) return -1;
+            *stop_req = 1;
+            sent = 1;
+        }
+        sceKernelUsleep(1000);
+    }
+    return -1;
+}
+
+// Release a traced target. All cleanup runs while it is stopped and still
+// traced: restore the breakpoint bytes, rewind threads left on a breakpoint
+// and let them run on so a queued trap is reported to us (stopping the target
+// again after each resume), clear the watchpoints, then PT_DETACH passing on
+// any signal still owed. Returns 0 once released or gone, -1 if the target is
+// still traced; *stop_req and *sig then say what a retry must resolve.
+static int debug_release_target(int pid, const struct debug_bp *bps, int *stop_req, int *sig) {
+    int restored = 1;
+    for (int b = 0; b < MAX_BPS; b++) {
+        if (bps[b].enabled &&
+            sys_proc_rw(pid, bps[b].address, (void *)&bps[b].saved_byte, 1, 1) != 0) {
+            restored = 0;
+        }
+    }
+    for (int round = 0; round < 8; round++) {
+        int st = debug_wait_stop(pid, bps, stop_req, sig);
+        if (st <= 0) return st == 0 ? 0 : -1;
+        if (!restored) return -1;
+        int rewound = debug_rewind_bp_threads(pid, bps);
+        if (rewound < 0) return -1;
+        if (rewound == 0) {
+            if (debug_clear_dbregs(pid) != 0 ||
+                kern_ptrace(PT_DETACH, pid, 0, *sig) < 0) {
+                return -1;
+            }
+            *sig = 0;
+            return 0;
+        }
+        if (kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) return -1;
+        *sig = 0;
+    }
+    return -1;
+}
+
+// Release a target, or keep it (with its breakpoints) for a later retry.
+static void debug_release_or_keep(int pid, const struct debug_bp *bps, int stop_req, int sig) {
+    if (debug_release_target(pid, bps, &stop_req, &sig) != 0) {
+        g_orphan_pid      = pid;
+        g_orphan_stop_req = stop_req;
+        g_orphan_sig      = sig;
+        memcpy(g_orphan_bp, bps, sizeof(g_orphan_bp));
+    }
 }
 
 static void debug_retry_orphan(void) {
-    int status = 0;
-    if (!g_orphan_pid) return;
-    int r = wait4(g_orphan_pid, &status, 1 , NULL);
-    if (attach_wait_gone(r, status, errno) || debug_detach_target(g_orphan_pid) == 0) {
+    if (g_orphan_pid &&
+        debug_release_target(g_orphan_pid, g_orphan_bp, &g_orphan_stop_req, &g_orphan_sig) == 0) {
         g_orphan_pid = 0;
     }
 }
@@ -313,10 +436,10 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
 
     if (wr <= 0 || !attach_wait_stopped(attach_status) ||
         kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
-        // Keep a target we could not detach, instead of forgetting it.
-        if (debug_detach_target((int)pid) != 0) {
-            g_orphan_pid = (int)pid;
-        }
+        // PT_ATTACH queued a SIGSTOP: it stays our stop request until reported.
+        int s = (wr > 0 && attach_wait_stopped(attach_status)) ? (attach_status >> 8) & 0xff : 0;
+        debug_release_or_keep((int)pid, g_no_bps, s != SIGSTOP,
+                              (s == SIGSTOP || s == SIGTRAP) ? 0 : s);
         goto fail_close;
     }
 
@@ -352,39 +475,9 @@ void debug_full_teardown(struct server_client *svc) {
     int alive = (sys_proc_cmd(g_debug_ctx.pid, SYS_PROC_VM_MAP, &vm_probe) == 0);
 
     if (alive) {
-
-        uint64_t enabled_addrs[MAX_BPS];
-        int n_enabled = 0;
-        for (int b = 0; b < MAX_BPS; b++) {
-            if (g_debug_ctx.bp[b].enabled) {
-                enabled_addrs[n_enabled++] = g_debug_ctx.bp[b].address;
-            }
-        }
-
-        for (int b = 0; b < MAX_BPS; b++) {
-            if (g_debug_ctx.bp[b].enabled) {
-                sys_proc_rw(g_debug_ctx.pid, g_debug_ctx.bp[b].address,
-                            &g_debug_ctx.bp[b].saved_byte, 1, 1);
-            }
-        }
-
-        bp_iterative_sweep(enabled_addrs, n_enabled, "detach-rescue");
-
-        int count = kern_ptrace(PT_GETNUMLWPS, g_debug_ctx.pid, 0, 0);
-        if (count > 0) {
-            uint32_t *lwpids = (uint32_t *)net_alloc_buffer((size_t)count * sizeof(uint32_t));
-            if (lwpids && kern_ptrace(PT_GETLWPLIST, g_debug_ctx.pid, lwpids, count) != -1) {
-                struct __dbreg64 zero = {0};
-                for (int i = 0; i < count; i++) {
-                    kern_ptrace(PT_SETDBREGS, (int)lwpids[i], &zero, 0);
-                }
-            }
-            if (lwpids) free(lwpids);
-        }
-
-        if (debug_detach_target((int)g_debug_ctx.pid) != 0) {
-            g_orphan_pid = (int)g_debug_ctx.pid;
-        }
+        // Release it (breakpoints, watchpoints, detach) while it is stopped and
+        // traced; if that fails, keep it and its breakpoints for a retry.
+        debug_release_or_keep((int)g_debug_ctx.pid, g_debug_ctx.bp, 0, 0);
     }
 
     if (svc && svc->dbgctx.dbgfd > 0) {
