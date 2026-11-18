@@ -102,6 +102,75 @@ int g_pending_sig_pid;
 int g_pending_signal;
 long g_last_alive_check;
 
+// A target left traced after a failed attach because it could not be
+// released. It is not a debug session (g_debug_ctx stays clear), but it is
+// kept with what a retry needs: whether the SIGSTOP queued by PT_ATTACH is
+// still outstanding, and a signal still owed to it. The next
+// CMD_DEBUG_ATTACH or CMD_DEBUG_DETACH retries the release. g_debug_mutex.
+static int g_orphan_pid;
+static int g_orphan_stop_req;
+static int g_orphan_sig;
+static int g_orphan_stopped;
+
+// Release a target whose attach failed. No breakpoint, watchpoint or step
+// exists yet, so the only thing to resolve is the SIGSTOP that PT_ATTACH
+// queued (*stop_req): it must be reported before PT_DETACH, or it would stop
+// the released target. The server never sends a SIGSTOP of its own here: a
+// thread may already have taken the queued one, and a second would then be
+// queued apart. Other stops seen meanwhile are resumed and their signals
+// (a SIGTRAP too: it can only be the game's) passed on with PT_CONTINUE or
+// PT_DETACH, kept in *sig. FreeBSD refuses these ptrace requests on a target
+// that is not stopped with its stop collected (EBUSY); *stopped records a stop
+// that wait4 has reported and that has not been resumed since.
+// Returns 0 once released or gone; -1 if the target is still traced, e.g.
+// the SIGSTOP was not reported in time, or never will be because an outside
+// SIGCONT cancelled it (which cannot be told apart), so it is kept.
+static int debug_release_attach(int pid, int *stopped, int *stop_req, int *sig) {
+    for (int spins = 0; spins <= 1000; spins++) {
+        int status = 0;
+        int r = wait4(pid, &status, 1 , NULL);
+        if (r < 0 || (r > 0 && !attach_wait_stopped(status))) {
+            return attach_wait_gone(r, status, errno) ? 0 : -1;
+        }
+        if (r > 0) {
+            *stopped = 1;
+            int s = (status >> 8) & 0xff;
+            if (s == SIGSTOP && *stop_req) {
+                // Taken as the queued one: wait4 gives only the signal number,
+                // so an outside SIGSTOP reported first looks the same, and the
+                // queued one can then stop the target after release.
+                *stop_req = 0;
+            } else {
+                *sig = s;
+            }
+        }
+        if (*stopped) {
+            if (!*stop_req) {
+                if (kern_ptrace(PT_DETACH, pid, 0, *sig) < 0) return -1;
+                *stopped = 0;
+                *sig = 0;
+                return 0;
+            }
+            // The queued SIGSTOP is still to come: let the target run to it.
+            if (kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) return -1;
+            *stopped = 0;
+            *sig = 0;
+        } else if (!*stop_req) {
+            // Running with nothing of ours queued: no way to stop it safely.
+            return -1;
+        }
+        sceKernelUsleep(1000);
+    }
+    return -1;
+}
+
+static void debug_retry_orphan(void) {
+    if (g_orphan_pid &&
+        debug_release_attach(g_orphan_pid, &g_orphan_stopped, &g_orphan_stop_req, &g_orphan_sig) == 0) {
+        g_orphan_pid = 0;
+    }
+}
+
 #define BP_DISABLE_VERIFY_MAX 16
 static uint64_t g_recently_disabled_bps[BP_DISABLE_VERIFY_MAX];
 static int      g_recently_disabled_count = 0;
@@ -251,21 +320,41 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
         return 1;
     }
 
+    int reply = CMD_ERROR;
+    scePthreadMutexLock(&g_debug_mutex);
+
+    debug_retry_orphan();
+    if (g_debug_ctx.attached || g_orphan_pid) {
+        reply = CMD_ALREADY_DEBUG;
+        goto fail_close;
+    }
+
     if (kern_ptrace(PT_ATTACH, (int)pid, 0, 0) < 0) {
         goto fail_close;
     }
 
-    {
-        int attach_status = 0;
-        int spins = 0;
-        while (wait4((int)pid, &attach_status, 1 , NULL) <= 0) {
-            if (++spins > 200) break;
-            sceKernelUsleep(1000);
-        }
+    // Only continue once the target has really stopped; a timeout is a failure.
+    int attach_status = 0;
+    int spins = 0;
+    int wr;
+    while ((wr = wait4((int)pid, &attach_status, 1 , NULL)) <= 0) {
+        if (++spins > 1000) break;
+        sceKernelUsleep(1000);
     }
 
-    if (kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
-        kern_ptrace(PT_DETACH, (int)pid, 0, 0);
+    if (wr <= 0 || !attach_wait_stopped(attach_status) ||
+        kern_ptrace(PT_CONTINUE, (int)pid, (void *)1, 0) < 0) {
+        // Release it with PT_ATTACH's SIGSTOP resolved first, or keep it.
+        int s = (wr > 0 && attach_wait_stopped(attach_status)) ? (attach_status >> 8) & 0xff : 0;
+        int stop_req = s != SIGSTOP;
+        int sig = s == SIGSTOP ? 0 : s;
+        int stopped = wr > 0 && attach_wait_stopped(attach_status);
+        if (debug_release_attach((int)pid, &stopped, &stop_req, &sig) != 0) {
+            g_orphan_pid      = (int)pid;
+            g_orphan_stopped  = stopped;
+            g_orphan_stop_req = stop_req;
+            g_orphan_sig      = sig;
+        }
         goto fail_close;
     }
 
@@ -279,13 +368,15 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
     curdbgctx        = &svc->dbgctx;
     g_debugging      = 1;
 
+    scePthreadMutexUnlock(&g_debug_mutex);
     net_send_int32(fd, CMD_SUCCESS);
     return 0;
 
 fail_close:
+    scePthreadMutexUnlock(&g_debug_mutex);
     sceNetSocketClose(svc->dbgctx.dbgfd);
     svc->dbgctx.dbgfd = 0;
-    net_send_int32(fd, CMD_ERROR);
+    net_send_int32(fd, reply);
     return 1;
 }
 
@@ -342,13 +433,31 @@ void debug_full_teardown(struct server_client *svc) {
 }
 
 int debug_detach_handle(int fd, struct cmd_packet *packet) {
+    scePthreadMutexLock(&g_debug_mutex);
     if (!g_debug_ctx.attached) {
-        net_send_int32(fd, CMD_ERROR);
-        return 1;
+        // No session: retry the release of a target kept after a failed attach.
+        int orphan = g_orphan_pid;
+        debug_retry_orphan();
+        int released = orphan && !g_orphan_pid;
+        scePthreadMutexUnlock(&g_debug_mutex);
+        net_send_int32(fd, released ? CMD_SUCCESS : CMD_ERROR);
+        return released ? 0 : 1;
     }
     debug_full_teardown(curdbgcli);
+    scePthreadMutexUnlock(&g_debug_mutex);
     net_send_int32(fd, CMD_SUCCESS);
     return 0;
+}
+
+// Client disconnect: tear down the session only if this client still owns
+// it. Checked under the lock, so a session another client has detached and
+// replaced in the meantime is left alone.
+void debug_client_disconnect(struct server_client *svc) {
+    scePthreadMutexLock(&g_debug_mutex);
+    if (svc->debugging && curdbgcli == svc) {
+        debug_full_teardown(svc);
+    }
+    scePthreadMutexUnlock(&g_debug_mutex);
 }
 
 int dispatch_debug_events(void) {

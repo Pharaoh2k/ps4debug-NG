@@ -8,6 +8,7 @@
 #include "net.h"
 #include "ptrace.h"
 #include "debug_port.h"
+#include "attach_wait.h"
 
 struct __reg64 {
     uint64_t r_r15;
@@ -151,6 +152,7 @@ int debug_detach_handle(int fd, struct cmd_packet *packet);
 int dispatch_debug_events(void);
 
 void debug_full_teardown(struct server_client *svc);
+void debug_client_disconnect(struct server_client *svc);
 int debug_set_breakpoint_handle(int fd, struct cmd_packet *packet);
 int debug_set_watchpoint_handle(int fd, struct cmd_packet *packet);
 int debug_get_thread_list_handle(int fd, struct cmd_packet *packet);

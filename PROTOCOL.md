@@ -146,10 +146,51 @@ should listen on 755 and send the legacy 8-byte body.
 The port is validated, and the connect-back is made, before
 `ptrace(PT_ATTACH)`: a wrong port, a closed listener or a firewall makes the
 attach fail with `CMD_ERROR` without touching the target, and no socket or
-debugging state is left behind, so the client can attach again. If
-`PT_ATTACH` or `PT_CONTINUE` fails after the connect-back, the server detaches
-the target (when needed) and closes the interrupt socket before replying
-`CMD_ERROR`. Existing 4/8-byte clients are unaffected.
+debugging state is left behind, so the client can attach again. Existing
+4/8-byte clients are unaffected.
+
+After `PT_ATTACH` the server waits up to about 1 s for `wait4` to report that
+the target has stopped. The attach only succeeds once that stop has been seen
+and `PT_CONTINUE` has resumed the target. If no stop is reported in time, or
+`PT_CONTINUE` fails, the server closes the interrupt socket, replies
+`CMD_ERROR` and releases the target.
+
+Releasing a target after a failed attach: no breakpoint, watchpoint or step
+exists yet, so the only thing to resolve is the `SIGSTOP` that `PT_ATTACH`
+queued. It must be reported before `PT_DETACH`, or it would stop the
+released target. The server never sends a `SIGSTOP` of its own here: a thread
+may already have taken the queued one (FreeBSD takes a signal off the queue
+before the stop completes), and a second would then be queued apart. Other
+stops seen meanwhile are resumed and their signals passed on with that
+`PT_CONTINUE` or with `PT_DETACH` (a `SIGTRAP` too: it can only be the
+game's). FreeBSD refuses these ptrace requests on a traced process that is
+not stopped (`EBUSY`), so the server only acts on a stop that `wait4` has
+reported. During failed-attach recovery the server sends no additional
+`SIGSTOP`. One exception remains: `wait4` reports only the signal number, so
+if an outside `SIGSTOP` is reported first, the server counts it as the queued
+one and may detach while the original attach stop is still outstanding; the
+target can then stop after detach.
+
+If the target cannot be released (the queued `SIGSTOP` is not reported in
+time, or a request fails), it is not forgotten: the server keeps its pid,
+whether the queued `SIGSTOP` is still outstanding and any signal still owed
+(it is not a debug session, so all other debug commands still reply
+`CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH`, from any
+client, retries the release. The pid is dropped once the release succeeds or
+`wait4` shows the target has exited or is no longer traced (`ECHILD`; other
+`wait4` errors keep the pid). Until then `CMD_DEBUG_ATTACH` replies
+`CMD_ALREADY_DEBUG` and `CMD_DEBUG_DETACH` replies `CMD_ERROR`, so the client
+can simply retry. If the queued `SIGSTOP` never arrives, for example because
+an outside `SIGCONT` removed it, the server cannot tell that from one still
+on its way (a `SIGCONT` does not remove a `SIGSTOP` a thread has already
+taken), so it keeps the pid. Only a reported `SIGSTOP` ends that (or the
+target exiting); other stops just have their signals passed on. A kept
+target is still traced, so a signal it receives stops it until the next
+`CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH` retries the release.
+
+A client's disconnect only tears down the session it still owns: the check
+is made under the debug lock, so a session another client has detached and
+replaced in the meantime is left alone.
 
 Do not rely on retrying against older servers: they ignore the extra 4 bytes
 and connect to 755, and on 1.3.x builds before this change a failed
@@ -590,7 +631,9 @@ debug session. The dispatcher returns early with no response if none exists.
   `client_ip` is in network byte order (as in `sin_addr.s_addr`); `debug_port`
   is a plain host-order integer (e.g. `7550`), `0` = default 755.
 - **Response:** `CMD_SUCCESS`, or `CMD_ALREADY_DEBUG` / `CMD_ERROR`
-  (`CMD_ERROR` is also returned for `debug_port > 65535`).
+  (`CMD_ERROR` is also returned for `debug_port > 65535` and when the target
+  does not stop or cannot be resumed; `CMD_ALREADY_DEBUG` also while an earlier
+  failed attach still awaits its detach, see §1.9).
 - **Side effect:** server opens outbound TCP to client on port 755, or on
   `debug_port` if given (see §1.9), and `ptrace(PT_ATTACH)`-es the target.
 
@@ -609,7 +652,9 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 #### `CMD_DEBUG_DETACH = 0xBDBB0002` (kern.c:216-461)
 - **Request body:** none.
 - **Response:** `CMD_SUCCESS`. Clears all breakpoints/watchpoints, resumes target,
-  closes port 755 connection.
+  closes port 755 connection. With no session attached, it retries the
+  release of a target kept after a failed attach (§1.9): `CMD_SUCCESS` once
+  released, otherwise `CMD_ERROR`.
 
 #### `CMD_DEBUG_SET_BREAKPOINT = 0xBDBB0003` (kern.c:463-501)
 - **Request body:** `struct cmd_debug_breakpt_packet` (16 bytes, `{index, enabled, address}`).
