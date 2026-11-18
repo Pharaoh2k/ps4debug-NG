@@ -74,8 +74,10 @@ static int fake_errno;
 static int wait4_fail_errno;   // next wait4 fails with this errno (once)
 static int detach_busy_left;   // the next N PT_DETACH fail with EBUSY
 static int continue_fail_left; // the next N PT_CONTINUE fail
-static int lenient_continue;   // PT_CONTINUE also works on a running target
-                               // (not FreeBSD; models an unverified kernel)
+static int lenient_continue;   // PT_CONTINUE also works on a running target,
+                               // clearing a SIGSTOP a thread has taken
+static int lenient_numlwps;    // PT_GETNUMLWPS also works on a running target
+                               // (both not FreeBSD; model an unverified kernel)
 static int lock_held;
 static int unlocked_kernel_calls;
 static void (*lock_hook)(void);
@@ -193,6 +195,7 @@ static int fake_ptrace(int op, int pid, void *addr, int data) {
         queue_stop(p);
         return 0;
     case PT_GETNUMLWPS:
+        if (lenient_numlwps && p->traced) return 1;
         if (need_stopped(p)) return -1;
         return 1;
     case PT_GETLWPLIST:
@@ -200,7 +203,11 @@ static int fake_ptrace(int op, int pid, void *addr, int data) {
         ((uint32_t *)addr)[0] = (uint32_t)pid * 10;
         return 1;
     case PT_CONTINUE:
-        if (lenient_continue && p->traced && !p->stopped) return 0;
+        if (lenient_continue && p->traced && !p->stopped) {
+            p->stop_taken = 0;
+            p->taken_due = NEVER;
+            return 0;
+        }
         if (need_stopped(p)) return -1;
         if (continue_fail_left > 0) { continue_fail_left--; return fail(EIO); }
         return resume(p, data, 0);
@@ -346,6 +353,7 @@ static void reset(void) {
     detach_busy_left = 0;
     continue_fail_left = 0;
     lenient_continue = 0;
+    lenient_numlwps = 0;
     lock_held = 0;
     unlocked_kernel_calls = 0;
     lock_hook = NULL;
@@ -354,6 +362,7 @@ static void reset(void) {
     g_orphan_pid = 0;
     g_orphan_stop_req = 0;
     g_orphan_sig = 0;
+    g_orphan_stopped = 0;
     g_debugging = 0;
     curdbgcli = NULL;
     curdbgctx = NULL;
@@ -590,6 +599,38 @@ static void test_no_second_sigstop(void) {
     CHECK(released(p) && p->sigstops == 0);
 }
 
+// The accepted exception: a thread has taken PT_ATTACH's SIGSTOP, the attach
+// wait times out, and an outside SIGSTOP is reported first. wait4 gives only
+// the signal number, so it is counted as the queued one: the release sends
+// no SIGSTOP, drops the pid, and leaves exactly the original stop
+// outstanding, which then stops the target after detach.
+static void test_outside_sigstop_first(void) {
+    reset();
+    struct fproc *p = add_proc(100, 1500000);   // taken now, completes at 1.5 s
+    p->take_sigstop_early = 1;
+    p->ext_sig = SIGSTOP;                         // outside SIGSTOP at 1.2 s
+    p->ext_due = 1200000;
+    CHECK(attach(&cli_a, 100) == CMD_ERROR);
+    CHECK(p->sigstops == 0);
+    CHECK(g_orphan_pid == 0 && !p->traced && p->detaches == 1);
+    CHECK(p->stop_taken && !p->stop_pending);    // the original, only
+    CHECK(p->detached_with_stop_pending == 1);
+}
+
+// On a kernel that lets ptrace requests through on a running target, a
+// probe cannot tell that the target is stopped: PT_GETNUMLWPS succeeds while
+// it runs, and a PT_CONTINUE then clears the SIGSTOP a thread has taken. The
+// release relies on the stop it has seen instead.
+static void test_lenient_kernel_tracks_stop(void) {
+    reset();
+    lenient_numlwps = 1;
+    lenient_continue = 1;
+    struct fproc *p = add_proc(100, 1500000);   // taken now, completes at 1.5 s
+    p->take_sigstop_early = 1;
+    CHECK(attach(&cli_a, 100) == CMD_ERROR);
+    CHECK(released(p) && g_orphan_pid == 0 && p->sigstops == 0);
+}
+
 // A SIGCONT removes PT_ATTACH's queued SIGSTOP (CMD_DEBUG_PROCESS_STOP resume
 // sends one). The server cannot tell that from a SIGSTOP still on its way,
 // so it sends none and keeps the pid until the target stops or exits.
@@ -639,6 +680,8 @@ int main(void) {
     test_failed_attach_passes_signals();
     test_release_sees_other_stop();
     test_no_second_sigstop();
+    test_outside_sigstop_first();
+    test_lenient_kernel_tracks_stop();
     test_sigcont_keeps_pid();
     test_kept_pid_wait4_errors();
 

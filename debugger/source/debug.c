@@ -110,6 +110,7 @@ long g_last_alive_check;
 static int g_orphan_pid;
 static int g_orphan_stop_req;
 static int g_orphan_sig;
+static int g_orphan_stopped;
 
 // Release a target whose attach failed. No breakpoint, watchpoint or step
 // exists yet, so the only thing to resolve is the SIGSTOP that PT_ATTACH
@@ -119,19 +120,20 @@ static int g_orphan_sig;
 // queued apart. Other stops seen meanwhile are resumed and their signals
 // (a SIGTRAP too: it can only be the game's) passed on with PT_CONTINUE or
 // PT_DETACH, kept in *sig. FreeBSD refuses these ptrace requests on a target
-// that is not stopped with its stop collected (EBUSY).
+// that is not stopped with its stop collected (EBUSY); *stopped records a stop
+// that wait4 has reported and that has not been resumed since.
 // Returns 0 once released or gone; -1 if the target is still traced, e.g.
 // the SIGSTOP was not reported in time, or never will be because an outside
 // SIGCONT cancelled it (which cannot be told apart), so it is kept.
-static int debug_release_attach(int pid, int *stop_req, int *sig) {
+static int debug_release_attach(int pid, int *stopped, int *stop_req, int *sig) {
     for (int spins = 0; spins <= 1000; spins++) {
         int status = 0;
         int r = wait4(pid, &status, 1 , NULL);
         if (r < 0 || (r > 0 && !attach_wait_stopped(status))) {
             return attach_wait_gone(r, status, errno) ? 0 : -1;
         }
-        int stopped = r > 0;
         if (r > 0) {
+            *stopped = 1;
             int s = (status >> 8) & 0xff;
             if (s == SIGSTOP && *stop_req) {
                 // The queued one. An outside SIGSTOP reported first looks the
@@ -141,18 +143,17 @@ static int debug_release_attach(int pid, int *stop_req, int *sig) {
             } else {
                 *sig = s;
             }
-        } else {
-            // Stopped with the stop already collected (PT_GETNUMLWPS works)?
-            stopped = kern_ptrace(PT_GETNUMLWPS, pid, 0, 0) >= 0;
         }
-        if (stopped) {
+        if (*stopped) {
             if (!*stop_req) {
                 if (kern_ptrace(PT_DETACH, pid, 0, *sig) < 0) return -1;
+                *stopped = 0;
                 *sig = 0;
                 return 0;
             }
             // The queued SIGSTOP is still to come: let the target run to it.
             if (kern_ptrace(PT_CONTINUE, pid, (void *)1, *sig) < 0) return -1;
+            *stopped = 0;
             *sig = 0;
         } else if (!*stop_req) {
             // Running with nothing of ours queued: no way to stop it safely.
@@ -165,7 +166,7 @@ static int debug_release_attach(int pid, int *stop_req, int *sig) {
 
 static void debug_retry_orphan(void) {
     if (g_orphan_pid &&
-        debug_release_attach(g_orphan_pid, &g_orphan_stop_req, &g_orphan_sig) == 0) {
+        debug_release_attach(g_orphan_pid, &g_orphan_stopped, &g_orphan_stop_req, &g_orphan_sig) == 0) {
         g_orphan_pid = 0;
     }
 }
@@ -347,8 +348,10 @@ int debug_attach_handle_svc(struct server_client *svc, struct cmd_packet *packet
         int s = (wr > 0 && attach_wait_stopped(attach_status)) ? (attach_status >> 8) & 0xff : 0;
         int stop_req = s != SIGSTOP;
         int sig = s == SIGSTOP ? 0 : s;
-        if (debug_release_attach((int)pid, &stop_req, &sig) != 0) {
+        int stopped = wr > 0 && attach_wait_stopped(attach_status);
+        if (debug_release_attach((int)pid, &stopped, &stop_req, &sig) != 0) {
             g_orphan_pid      = (int)pid;
+            g_orphan_stopped  = stopped;
             g_orphan_stop_req = stop_req;
             g_orphan_sig      = sig;
         }

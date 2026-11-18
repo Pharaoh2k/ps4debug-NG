@@ -164,9 +164,12 @@ before the stop completes), and a second would then be queued apart. Other
 stops seen meanwhile are resumed and their signals passed on with that
 `PT_CONTINUE` or with `PT_DETACH` (a `SIGTRAP` too: it can only be the
 game's). FreeBSD refuses these ptrace requests on a traced process that is
-not stopped (`EBUSY`), so the server waits for the stop. An outside `SIGSTOP`
-reported before the queued one cannot be told apart from it; the queued one
-then stops the target after release, which is what that sender asked for.
+not stopped (`EBUSY`), so the server only acts on a stop that `wait4` has
+reported. During failed-attach recovery the server sends no additional
+`SIGSTOP`. One exception remains: `wait4` reports only the signal number, so
+if an outside `SIGSTOP` is reported first, the server counts it as the queued
+one and may detach while the original attach stop is still outstanding; the
+target can then stop after detach.
 
 If the target cannot be released (the queued `SIGSTOP` is not reported in
 time, or a request fails), it is not forgotten: the server keeps its pid,
@@ -180,7 +183,10 @@ client, retries the release. The pid is dropped once the release succeeds or
 can simply retry. If the queued `SIGSTOP` never arrives, for example because
 an outside `SIGCONT` removed it, the server cannot tell that from one still
 on its way (a `SIGCONT` does not remove a `SIGSTOP` a thread has already
-taken), so it keeps the pid until the target stops or exits.
+taken), so it keeps the pid. Only a reported `SIGSTOP` ends that (or the
+target exiting); other stops just have their signals passed on. A kept
+target is still traced, so a signal it receives stops it until the next
+`CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH` retries the release.
 
 A client's disconnect only tears down the session it still owns: the check
 is made under the debug lock, so a session another client has detached and
