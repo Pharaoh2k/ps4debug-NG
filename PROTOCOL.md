@@ -153,55 +153,37 @@ After `PT_ATTACH` the server waits up to about 1 s for `wait4` to report that
 the target has stopped. The attach only succeeds once that stop has been seen
 and `PT_CONTINUE` has resumed the target. If no stop is reported in time, or
 `PT_CONTINUE` fails, the server closes the interrupt socket, replies
-`CMD_ERROR` and releases the target (below).
+`CMD_ERROR` and releases the target.
 
-Releasing a target (here, in teardown and in the retry below) is done while
-it is stopped and still traced, because FreeBSD refuses ptrace requests on a
-traced process that is not stopped (`EBUSY`):
+Releasing a target after a failed attach: no breakpoint, watchpoint or step
+exists yet, so the only thing to resolve is the `SIGSTOP` that `PT_ATTACH`
+queued. It must be reported before `PT_DETACH`, or it would stop the
+released target. The server never sends a `SIGSTOP` of its own here: a thread
+may already have taken the queued one (FreeBSD takes a signal off the queue
+before the stop completes), and a second would then be queued apart. Other
+stops seen meanwhile are resumed and their signals passed on with that
+`PT_CONTINUE` or with `PT_DETACH` (a `SIGTRAP` too: it can only be the
+game's). FreeBSD refuses these ptrace requests on a traced process that is
+not stopped (`EBUSY`), so the server waits for the stop. An outside `SIGSTOP`
+reported before the queued one cannot be told apart from it; the queued one
+then stops the target after release, which is what that sender asked for.
 
-1. The target is brought to a reported stop: a stop already collected is
-   used as is; otherwise one that `wait4` reports, or else the server sends
-   `SIGSTOP` and waits up to about 1 s.
-2. For each breakpoint of the session still in place, threads that ran its
-   `int3` (`rip` = address + 1) are moved back onto it, its original byte is
-   written back, and it is marked done. Nothing ran since the `int3` was
-   there, so those threads did run it; a breakpoint that is done is never
-   touched again, because once the target runs, address + 1 can be a real
-   instruction boundary (e.g. after a one-byte `push`).
-3. If a thread was moved, or the stop was the debugger's own trap, the target
-   is resumed once so a trap still queued on another thread is reported to
-   the server (not to the released game), and step 1 runs again (at most 8
-   rounds).
-4. Every thread's debug registers are cleared (watchpoints).
-5. `PT_DETACH`.
+If the target cannot be released (the queued `SIGSTOP` is not reported in
+time, or a request fails), it is not forgotten: the server keeps its pid,
+whether the queued `SIGSTOP` is still outstanding and any signal still owed
+(it is not a debug session, so all other debug commands still reply
+`CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH`, from any
+client, retries the release. The pid is dropped once the release succeeds or
+`wait4` shows the target has exited or is no longer traced (`ECHILD`; other
+`wait4` errors keep the pid). Until then `CMD_DEBUG_ATTACH` replies
+`CMD_ALREADY_DEBUG` and `CMD_DEBUG_DETACH` replies `CMD_ERROR`, so the client
+can simply retry. If the queued `SIGSTOP` never arrives, for example because
+an outside `SIGCONT` removed it, the server cannot tell that from one still
+on its way (a `SIGCONT` does not remove a `SIGSTOP` a thread has already
+taken), so it keeps the pid until the target stops or exits.
 
-Every step's result is checked. A `SIGSTOP` sent by the server, or queued by
-`PT_ATTACH`, counts as outstanding until a `SIGSTOP` stop is reported; the
-target is never released while it is, so it cannot stop again untraced.
-Other stops seen meanwhile are resumed and their signals passed on with that
-`PT_CONTINUE` or with `PT_DETACH`, except a `SIGTRAP` the debugger may have
-caused: when releasing a session (its breakpoints, watchpoints or a step
-still in flight), a `SIGTRAP` is taken as the debugger's own and dropped,
-since it cannot be told apart from one the game raises itself. After a
-failed attach nothing of the debugger's exists yet, so a `SIGTRAP` there is
-the game's and is passed on. No `SIGCONT` is sent. An outside
-`SIGSTOP` reported while the server's own is outstanding cannot be told apart
-from it; the target then stops again after release, as that sender asked.
-
-If any step fails, the target is not forgotten: the server keeps its pid,
-its breakpoints, whether its own stop request is outstanding and any signal
-still owed (it is not a debug session, so all other debug commands still
-reply `CMD_ERROR`), and the next `CMD_DEBUG_ATTACH` or `CMD_DEBUG_DETACH`,
-from any client, retries the release. The pid is dropped once the release
-succeeds or `wait4` shows the target has exited or is no longer traced
-(`ECHILD`; other `wait4` errors keep the pid). Until then `CMD_DEBUG_ATTACH`
-replies `CMD_ALREADY_DEBUG` and `CMD_DEBUG_DETACH` replies `CMD_ERROR`, so the
-client can simply retry.
-
-Teardown (`CMD_DEBUG_DETACH`, owner disconnect) keeps the pid the same way
-when the release fails, and `CMD_DEBUG_DETACH` then replies `CMD_ERROR`. A
-client's disconnect only tears down the session it still owns: the check is
-made under the debug lock, so a session another client has detached and
+A client's disconnect only tears down the session it still owns: the check
+is made under the debug lock, so a session another client has detached and
 replaced in the meantime is left alone.
 
 Do not rely on retrying against older servers: they ignore the extra 4 bytes
@@ -664,9 +646,8 @@ before `cmd_handler` runs and routes to `debug_attach_handle_svc` instead.
 #### `CMD_DEBUG_DETACH = 0xBDBB0002` (kern.c:216-461)
 - **Request body:** none.
 - **Response:** `CMD_SUCCESS`. Clears all breakpoints/watchpoints, resumes target,
-  closes port 755 connection. `CMD_ERROR` if the target could not be detached
-  and its pid is kept (§1.9). With no session attached, it retries the
-  pending detach of an earlier failed attach (§1.9): `CMD_SUCCESS` once
+  closes port 755 connection. With no session attached, it retries the
+  release of a target kept after a failed attach (§1.9): `CMD_SUCCESS` once
   released, otherwise `CMD_ERROR`.
 
 #### `CMD_DEBUG_SET_BREAKPOINT = 0xBDBB0003` (kern.c:463-501)
