@@ -44,7 +44,10 @@ void *memchr(const void *s, int c, size_t n) {
   const uint64_t xmask = ones * ch;
   while (n >= sizeof(uint64_t)) {
     uint64_t w;
-    memcpy(&w, p, sizeof(w)); // unaligned-safe; clang turns this into one mov
+    // Unaligned-safe load. This file is built with GCC and -fno-builtin
+    // (clang only builds the .cpp files), so a plain memcpy would be a real
+    // call per word; GCC expands __builtin_memcpy to one mov even so.
+    __builtin_memcpy(&w, p, sizeof(w));
     w ^= xmask;
     if ((w - ones) & ~w & highs) break; // some byte of w == ch
     p += sizeof(uint64_t); n -= sizeof(uint64_t);
