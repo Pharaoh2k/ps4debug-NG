@@ -633,7 +633,8 @@ static void test_lenient_kernel_tracks_stop(void) {
 
 // A SIGCONT removes PT_ATTACH's queued SIGSTOP (CMD_DEBUG_PROCESS_STOP resume
 // sends one). The server cannot tell that from a SIGSTOP still on its way,
-// so it sends none and keeps the pid until the target stops or exits.
+// so it sends none and keeps the pid until a SIGSTOP is reported or the
+// target exits.
 static void test_sigcont_keeps_pid(void) {
     reset();
     struct fproc *p = add_proc(800, NEVER);

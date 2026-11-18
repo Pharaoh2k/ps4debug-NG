@@ -136,9 +136,9 @@ static int debug_release_attach(int pid, int *stopped, int *stop_req, int *sig) 
             *stopped = 1;
             int s = (status >> 8) & 0xff;
             if (s == SIGSTOP && *stop_req) {
-                // The queued one. An outside SIGSTOP reported first looks the
-                // same; ours then stops the target after release, which is
-                // what that sender asked for.
+                // Taken as the queued one: wait4 gives only the signal number,
+                // so an outside SIGSTOP reported first looks the same, and the
+                // queued one can then stop the target after release.
                 *stop_req = 0;
             } else {
                 *sig = s;
