@@ -28,9 +28,31 @@ void abort(void) { uprintf("[shim] abort()!"); for (;;); }
 void exit(int code)  { (void)code; uprintf("[shim] exit()!");  for (;;); }
 void _exit(int code) { (void)code; for (;;); }
 
+// Word-at-a-time scan: the AoB fast path in proc_scan_aob_handle skips to
+// the next candidate with memchr, so this must not be a naive byte loop or
+// the fast path can't pay off. Classic haszero SWAR over 8-byte words.
 void *memchr(const void *s, int c, size_t n) {
   const unsigned char *p = (const unsigned char *)s;
-  while (n--) { if (*p == (unsigned char)c) return (void *)p; ++p; }
+  const unsigned char ch = (unsigned char)c;
+
+  while (n && ((uintptr_t)p & (sizeof(uint64_t) - 1))) {
+    if (*p == ch) return (void *)p;
+    ++p; --n;
+  }
+  const uint64_t ones  = 0x0101010101010101ULL;
+  const uint64_t highs = 0x8080808080808080ULL;
+  const uint64_t xmask = ones * ch;
+  while (n >= sizeof(uint64_t)) {
+    uint64_t w;
+    // Unaligned-safe load. This file is built with GCC and -fno-builtin
+    // (clang only builds the .cpp files), so a plain memcpy would be a real
+    // call per word; GCC expands __builtin_memcpy to one mov even so.
+    __builtin_memcpy(&w, p, sizeof(w));
+    w ^= xmask;
+    if ((w - ones) & ~w & highs) break; // some byte of w == ch
+    p += sizeof(uint64_t); n -= sizeof(uint64_t);
+  }
+  while (n--) { if (*p == ch) return (void *)p; ++p; }
   return (void *)0;
 }
 int bcmp(const void *a, const void *b, size_t n) { return memcmp(a, b, n); }
