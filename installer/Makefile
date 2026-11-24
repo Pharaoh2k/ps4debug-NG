@@ -32,6 +32,9 @@ $(ODIR)/%.o: $(SDIR)/%.c
 $(ODIR)/%.o: $(SDIR)/%.s
 	$(AS) -c -o $@ $< $(SFLAGS)
 
+# embed.s pulls both payloads in with .incbin; rebuild when either changes.
+$(ODIR)/embed.o: ../debugger/debugger.bin ../kdebugger/kdebugger.elf
+
 $(ODIR):
 	@mkdir $@
 
