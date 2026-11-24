@@ -45,6 +45,13 @@ OBJS	:=	$(patsubst $(SDIR)/%.c, $(ODIR)/%.o, $(CFILES)) \
 
 LIBS	:= -lPS4
 
+# Header dependencies: each C/C++ compile also writes build/<name>.d (-MMD),
+# with an empty target per header (-MP) so a removed header does not break the
+# build. Every object also depends on its own .d: an object without one (built
+# before tracking existed) is rebuilt once instead of being trusted.
+DEPFLAGS := -MMD -MP
+DEPS	:= $(OBJS:.o=.d)
+
 TARGET = debugger.bin
 
 $(TARGET): $(ODIR) $(OBJS)
@@ -52,22 +59,25 @@ $(TARGET): $(ODIR) $(OBJS)
 	$(OBJCOPY) -O binary temp.t $(TARGET)
 	rm -f temp.t
 
-$(ODIR)/%.o: $(SDIR)/%.c
-	$(CC) -c -o $@ $< $(CFLAGS)
+$(ODIR)/%.o: $(SDIR)/%.c $(ODIR)/%.d
+	$(CC) -c -o $@ $< $(CFLAGS) $(DEPFLAGS)
 
-$(ODIR)/%.o: $(SDIR)/%.cpp
-	$(CXX) -c -o $@ $< $(CXXFLAGS)
+$(ODIR)/%.o: $(SDIR)/%.cpp $(ODIR)/%.d
+	$(CXX) -c -o $@ $< $(CXXFLAGS) $(DEPFLAGS)
 
 $(ODIR)/%.o: $(SDIR)/%.s
 	$(AS) -c -o $@ $< $(SFLAGS)
 
-$(ODIR)/Zydis.o: $(ZYDIR)/Zydis.c $(ZYDIR)/Zydis.h | $(ODIR)
-	$(CC) -c -o $@ $< $(CFLAGS) -O3 -DNDEBUG -w
+$(ODIR)/Zydis.o: $(ZYDIR)/Zydis.c $(ZYDIR)/Zydis.h $(ODIR)/Zydis.d | $(ODIR)
+	$(CC) -c -o $@ $< $(CFLAGS) -O3 -DNDEBUG -w $(DEPFLAGS)
 
 $(ODIR)/lz4.o $(ODIR)/read_lz4.o: CFLAGS += -I$(LZ4DIR) $(LZ4DEFS)
 
-$(ODIR)/lz4.o: $(LZ4DIR)/lz4.c $(LZ4DIR)/lz4.h | $(ODIR)
-	$(CC) -c -o $@ $< $(CFLAGS)
+$(ODIR)/lz4.o: $(LZ4DIR)/lz4.c $(LZ4DIR)/lz4.h $(ODIR)/lz4.d | $(ODIR)
+	$(CC) -c -o $@ $< $(CFLAGS) $(DEPFLAGS)
+
+# A missing .d only means its object must be rebuilt (see DEPFLAGS).
+$(DEPS):
 
 $(ODIR):
 	@mkdir $@
@@ -78,4 +88,6 @@ test:
 	$(MAKE) -C ../tests/unit
 
 clean:
-	rm -f $(TARGET) $(ODIR)/*.o
+	rm -f $(TARGET) $(ODIR)/*.o $(ODIR)/*.d
+
+-include $(wildcard $(DEPS))
