@@ -41,6 +41,12 @@ static int supports_attach_port(const char *level, size_t len) {
     return have >= 0 && have >= need;
 }
 
+static int supports_read_lz4(const char *level, size_t len) {
+    int have = level_value(level, len);
+    int need = level_value(CAPABILITY_READ_LZ4, strlen(CAPABILITY_READ_LZ4));
+    return have >= 0 && have >= need;
+}
+
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -55,9 +61,11 @@ static char *read_file(const char *path) {
 }
 
 int main(void) {
-    // The advertised level is 1.2 and the feature gate is 1.2.
-    CHECK(strcmp(PACKET_CAPABILITY_LEVEL, "1.2") == 0);
+    // The advertised level is 1.3; the attach port stays gated at 1.2 and
+    // the compressed read is gated at 1.3.
+    CHECK(strcmp(PACKET_CAPABILITY_LEVEL, "1.3") == 0);
     CHECK(strcmp(CAPABILITY_DEBUG_ATTACH_PORT, "1.2") == 0);
+    CHECK(strcmp(CAPABILITY_READ_LZ4, "1.3") == 0);
 
     // Wire layout: C-string clients still see only the unchanged brand.
     size_t len = sizeof(brand) - 1;
@@ -65,7 +73,7 @@ int main(void) {
     CHECK(brand[strlen(TEST_BRANDING)] == '\0');
     const char *level = brand + strlen(TEST_BRANDING) + 1;
     size_t level_len = len - strlen(TEST_BRANDING) - 1;
-    CHECK(level_len == 3 && memcmp(level, "1.2", 3) == 0);
+    CHECK(level_len == 3 && memcmp(level, "1.3", 3) == 0);
     CHECK(brand[len - 1] != '\0'); // no trailing NUL on the wire
 
     // Feature gating: 1.2+ supports the attach port, older levels do not.
@@ -76,6 +84,14 @@ int main(void) {
     CHECK(!supports_attach_port("1.0", 3));
     CHECK(!supports_attach_port("", 0));   // pre-capability servers send no level
     CHECK(!supports_attach_port("1", 1));
+
+    // 1.3+ supports the compressed read (0xBDAACC18); 1.2 servers do not.
+    CHECK(supports_read_lz4(level, level_len));
+    CHECK(supports_read_lz4("1.10", 4));
+    CHECK(supports_read_lz4("2.0", 3));
+    CHECK(!supports_read_lz4("1.2", 3));
+    CHECK(!supports_read_lz4("1.0", 3));
+    CHECK(!supports_read_lz4("", 0));
 
     // server.c must build the CMD_BRANDING reply from the shared macro.
     char *src = read_file(SERVER_C_PATH);

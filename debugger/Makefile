@@ -4,6 +4,7 @@ LIBPS4	:=	../ps4-payload-sdk/libPS4
 ZYDIR	:=	third_party/zydis
 CXXRT	:=	third_party/cxxrt
 KSDIR	:=	third_party/keystone
+LZ4DIR	:=	third_party/lz4
 
 CC		:=	gcc
 CXX		:=	clang++-18
@@ -15,6 +16,11 @@ IDIRS	:=	-I$(LIBPS4)/include -I. -Iinclude -I$(ZYDIR) -I$(KSDIR)/include
 LDIRS	:=	-L$(LIBPS4) -L. -Llib -L$(CXXRT)/lib -L$(KSDIR)/lib
 
 ZYDEFS	:=	-DZYAN_NO_LIBC
+
+# LZ4 without libc: the three memory helpers come from the compiler builtins.
+# Only lz4.c and read_lz4.c include lz4.h (see the target-specific CFLAGS below).
+LZ4DEFS	:=	-DLZ4_FREESTANDING=1 -DLZ4_memcpy=__builtin_memcpy \
+		-DLZ4_memmove=__builtin_memmove -DLZ4_memset=__builtin_memset
 
 ARCHFLAGS := -fPIE -nostartfiles -nostdlib -masm=intel -march=btver2 -mtune=btver2 -m64 -mabi=sysv -mcmodel=small -ffunction-sections -fdata-sections
 
@@ -35,7 +41,7 @@ CXXFILES :=	$(wildcard $(SDIR)/*.cpp)
 SFILES	:=	$(wildcard $(SDIR)/*.s)
 OBJS	:=	$(patsubst $(SDIR)/%.c, $(ODIR)/%.o, $(CFILES)) \
 		$(patsubst $(SDIR)/%.cpp, $(ODIR)/%.o, $(CXXFILES)) \
-		$(patsubst $(SDIR)/%.s, $(ODIR)/%.o, $(SFILES)) $(ODIR)/Zydis.o
+		$(patsubst $(SDIR)/%.s, $(ODIR)/%.o, $(SFILES)) $(ODIR)/Zydis.o $(ODIR)/lz4.o
 
 LIBS	:= -lPS4
 
@@ -57,6 +63,11 @@ $(ODIR)/%.o: $(SDIR)/%.s
 
 $(ODIR)/Zydis.o: $(ZYDIR)/Zydis.c $(ZYDIR)/Zydis.h | $(ODIR)
 	$(CC) -c -o $@ $< $(CFLAGS) -O3 -DNDEBUG -w
+
+$(ODIR)/lz4.o $(ODIR)/read_lz4.o: CFLAGS += -I$(LZ4DIR) $(LZ4DEFS)
+
+$(ODIR)/lz4.o: $(LZ4DIR)/lz4.c $(LZ4DIR)/lz4.h | $(ODIR)
+	$(CC) -c -o $@ $< $(CFLAGS)
 
 $(ODIR):
 	@mkdir $@

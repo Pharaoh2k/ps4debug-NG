@@ -14,7 +14,7 @@ citations. Nothing is summarized from external documentation.
 | Symbol              | Value                                | Source                     |
 |---------------------|--------------------------------------|----------------------------|
 | `PACKET_VERSION`    | `"1.3"`                              | protocol.h:12              |
-| `PACKET_BRANDING`   | `"ps4debug-NG by Pharaoh2k v1.3.4<NUL>1.2"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
+| `PACKET_BRANDING`   | `"ps4debug-NG by Pharaoh2k v1.3.4<NUL>1.3"` | protocol.h:13 (built from `version.h`; + capability level, see 2.1) |
 | `PACKET_MAGIC`      | `0xFFAABBCC`                         | protocol.h:14              |
 | `BROADCAST_MAGIC`   | `0xFFFFAAAA`                         | server.h:19                |
 
@@ -245,13 +245,14 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 - **Request body:** none.
 - **Response:** `uint32_t length`, then `length` bytes: the human branding string
   (`PACKET_BRANDING`, e.g. `"ps4debug-NG by Pharaoh2k v1.3.4"`), a single `NUL`, then a
-  **capability level** string (`"1.2"`), with no trailing NUL.
+  **capability level** string (`"1.3"`), with no trailing NUL.
 - **Capability level:** C-string clients read up to the first `NUL` and see only
   the unchanged brand; capability-aware clients read past the `NUL` to get the
   level and gate features on it. Capability `1.0` introduced `0xBDAACC04` bulk
   write; `1.1` guarantees content-verified process writes and truthful terminal
   status; `1.2` adds the optional `debug_port` field of `CMD_DEBUG_ATTACH`
-  (custom interrupt-channel port, §1.9). Built from
+  (custom interrupt-channel port, §1.9); `1.3` adds the LZ4-compressed read
+  `0xBDAACC18` (§2.2). Built from
   `PACKET_BRANDING "\0" PACKET_CAPABILITY_LEVEL` in `server.c`
   (`PACKET_CAPABILITY_LEVEL` lives in `capability.h`) - the literals are split
   so `\0` is a NUL byte, not an octal escape. The capability level is
@@ -284,6 +285,54 @@ All five are handled inline in `cmd_handler` (server.c:52-71).
 - **Request body:** `struct cmd_proc_read_packet` (16 bytes).
 - **Response:** `CMD_SUCCESS`, then up to `length` bytes in 64 KiB chunks.
 - **Kernel path:** `sys_proc_rw(..., write=0)`.
+
+#### `0xBDAACC18` - LZ4-compressed read (`proc_read_lz4_handle`, proc_read_lz4.c; wire format in read_lz4.h)
+`CMD_PROC_READ` with the reply cut into independently compressed blocks: zero
+pages, tables and code shrink a lot, packed assets cost 4 bytes per 64 KiB.
+Dispatched raw (no name macro); **not** auth-gated (mirrors `CMD_PROC_READ`).
+Send it only when the `CMD_BRANDING` capability level is `>= 1.3`
+(`CAPABILITY_READ_LZ4`); older payloads answer an unknown `0xBDAA` command
+with `CMD_ERROR` and drop the connection.
+- **Request body:** exactly 20 bytes,
+  `struct read_lz4_request { uint32_t pid; uint64_t address; uint32_t length; uint32_t flags; }`
+  (packed). `flags` is reserved and must be `0`.
+- **Errors (one status word, connection kept):** no body -> `CMD_DATA_NULL`;
+  a body that is not 20 bytes, or nonzero `flags` -> `CMD_ERROR`; out of
+  memory -> `CMD_DATA_NULL`.
+- **Response:** `CMD_SUCCESS`, `uint32_t block_size` (`65536`), then one frame
+  per block of the range: every block is `block_size` bytes except the last
+  (the remainder; none at all when `length` is 0). A frame is a `uint32_t`
+  header then its payload:
+
+  | Header bit 31 | Bits 0-30 (payload size)    | Payload                                                     |
+  |---------------|-----------------------------|-------------------------------------------------------------|
+  | `0`           | `1` .. block length - 1     | LZ4 **block** (not frame) that decodes to exactly the block length |
+  | `1`           | equal to the block length   | the block bytes as is                                       |
+
+  Blocks share no dictionary, so each decodes as soon as it arrives, with any
+  LZ4 block decoder (`LZ4_decompress_safe(src, dst, size, block_len)`,
+  Python `lz4.block.decompress(payload, uncompressed_size=block_len)`). A
+  frame is never more than 4 bytes over its block.
+- **Contents:** the decoded bytes equal what `CMD_PROC_READ` returns for the
+  same request (same 64 KiB reads from `address`; memory that cannot be read
+  comes back as zeros).
+- **Cost:** about 8 KB of payload code and 144 KiB of buffers per request.
+  The server compresses at LZ4's default speed (acceleration 1) on the
+  client's thread; incompressible blocks are detected early and are cheap.
+- **Reference decoder (Python):**
+  ```python
+  def read_lz4_decode(recv_exact, length):  # recv_exact(n) returns exactly n bytes
+      (status,) = struct.unpack("<I", recv_exact(4))
+      if status != 0x80000000: raise IOError(hex(status))  # errors are one word
+      (block_size,) = struct.unpack("<I", recv_exact(4))
+      out = bytearray()
+      while len(out) < length:
+          n = min(block_size, length - len(out))
+          (hdr,) = struct.unpack("<I", recv_exact(4))
+          payload = recv_exact(hdr & 0x7FFFFFFF)
+          out += payload if hdr & 0x80000000 else lz4.block.decompress(payload, uncompressed_size=n)
+      return bytes(out)
+  ```
 
 #### `CMD_PROC_WRITE = 0xBDAA0003` (proc.c:399-432)
 - **Request body:** `struct cmd_proc_write_packet` (16 bytes).
@@ -914,6 +963,7 @@ clients cannot invoke it directly.
 | `0xBDAACC15` | _(raw literal)_ Turbo CONFIG     | `proc_turboscan_config_handle`  | bit 1 |
 | `0xBDAACC16` | _(raw literal)_ Turbo REGIONS    | `proc_turboscan_regions_handle` | bit 1 |
 | `0xBDAACC17` | _(raw literal)_ Turbo CANCEL     | `proc_turboscan_cancel_handle`  | bit 1 |
+| `0xBDAACC18` | _(raw literal)_ LZ4 read         | `proc_read_lz4_handle`          |       |
 | `0xBDBB0001` | `CMD_DEBUG_ATTACH`               | `debug_attach_handle_svc`       |       |
 | `0xBDBB0002` | `CMD_DEBUG_DETACH`               | `debug_detach_handle`           |       |
 | `0xBDBB0003` | `CMD_DEBUG_SET_BREAKPOINT`       | `debug_set_breakpoint_handle`   |       |

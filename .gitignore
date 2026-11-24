@@ -27,3 +27,5 @@ tests/unit/test_debug_port
 tests/unit/test_capability
 tests/unit/test_attach_wait
 tests/unit/test_attach_session
+tests/unit/test_read_lz4
+tests/unit/test_read_lz4_handle
