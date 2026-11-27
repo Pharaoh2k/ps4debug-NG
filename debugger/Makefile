@@ -54,8 +54,10 @@ DEPS	:= $(OBJS:.o=.d)
 
 TARGET = debugger.bin
 
+# Link exactly OBJS (sorted like the old build/*.o glob), so objects left
+# in build/ by another branch or a removed source are not linked in.
 $(TARGET): $(ODIR) $(OBJS)
-	$(CC) $(LIBPS4)/crt0.s $(ODIR)/*.o -o temp.t $(CFLAGS) $(LFLAGS) $(LIBS) $(CXXRTLIBS)
+	$(CC) $(LIBPS4)/crt0.s $(sort $(OBJS)) -o temp.t $(CFLAGS) $(LFLAGS) $(LIBS) $(CXXRTLIBS)
 	$(OBJCOPY) -O binary temp.t $(TARGET)
 	rm -f temp.t
 
