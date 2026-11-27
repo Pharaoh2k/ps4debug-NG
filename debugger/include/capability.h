@@ -8,9 +8,13 @@
 //   1.0 - 0xBDAACC04 bulk write
 //   1.1 - content-verified process writes, truthful terminal status
 //   1.2 - CMD_DEBUG_ATTACH accepts an optional debug_port (see debug_port.h)
-#define PACKET_CAPABILITY_LEVEL "1.2"
+//   1.3 - 0xBDAACC18 LZ4-compressed process read (see read_lz4.h)
+#define PACKET_CAPABILITY_LEVEL "1.3"
 
 // Minimum level at which clients may send the 12-byte CMD_DEBUG_ATTACH body.
 #define CAPABILITY_DEBUG_ATTACH_PORT "1.2"
+
+// Minimum level at which clients may send 0xBDAACC18.
+#define CAPABILITY_READ_LZ4 "1.3"
 
 #endif

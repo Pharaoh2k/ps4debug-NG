@@ -20,18 +20,30 @@ OBJS	:=	$(patsubst $(SDIR)/%.c, $(ODIR)/%.o, $(CFILES)) $(patsubst $(SDIR)/%.s, 
 
 LIBS	:= -lKSDK
 
+# Header dependencies: each C compile also writes build/<name>.d (-MMD), with
+# an empty target per header (-MP) so a removed header does not break the
+# build. Every object also depends on its own .d: an object without one (built
+# before tracking existed) is rebuilt once instead of being trusted.
+DEPFLAGS := -MMD -MP
+DEPS	:= $(OBJS:.o=.d)
+
 TARGET = kdebugger.elf
 
+# Link exactly OBJS (sorted like the old build/*.o glob), so objects left
+# in build/ by another branch or a removed source are not linked in.
 $(TARGET): $(ODIR) $(OBJS)
-	$(CC) crt0.s $(ODIR)/*.o -o $(TARGET) $(CFLAGS) $(LFLAGS) $(LIBS)
+	$(CC) crt0.s $(sort $(OBJS)) -o $(TARGET) $(CFLAGS) $(LFLAGS) $(LIBS)
 	elfedit --output-type=DYN $(TARGET)
 	strip $(TARGET)
 
-$(ODIR)/%.o: $(SDIR)/%.c
-	$(CC) -c -o $@ $< $(CFLAGS)
+$(ODIR)/%.o: $(SDIR)/%.c $(ODIR)/%.d
+	$(CC) -c -o $@ $< $(CFLAGS) $(DEPFLAGS)
 
 $(ODIR)/%.o: $(SDIR)/%.s
 	$(AS) -c -o $@ $< $(SFLAGS)
+
+# A missing .d only means its object must be rebuilt (see DEPFLAGS).
+$(DEPS):
 
 $(ODIR):
 	@mkdir $@
@@ -39,4 +51,6 @@ $(ODIR):
 .PHONY: clean
 
 clean:
-	rm -f $(TARGET) $(ODIR)/*.o
+	rm -f $(TARGET) $(ODIR)/*.o $(ODIR)/*.d
+
+-include $(wildcard $(DEPS))

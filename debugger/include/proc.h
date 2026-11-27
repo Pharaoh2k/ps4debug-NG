@@ -18,6 +18,7 @@ struct proc_vm_map_entry {
 
 int proc_list_handle(int fd, struct cmd_packet *packet);
 int proc_read_handle(int fd, struct cmd_packet *packet);
+int proc_read_lz4_handle(int fd, struct cmd_packet *packet);
 int proc_read_stack_handle(int fd, struct cmd_packet *packet);
 int proc_disasm_region_handle(int fd, struct cmd_packet *packet);
 int proc_extract_code_xrefs_handle(int fd, struct cmd_packet *packet);

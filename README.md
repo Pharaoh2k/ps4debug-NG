@@ -81,6 +81,12 @@ still be rejected.
 - **Read and content-verified write target memory** in 64 KiB streamed chunks.
   Writes report success only after exact readback; short transfers, syscall
   failures, and byte mismatches return failure.
+- **LZ4-compressed read** (`0xBDAACC18`, capability `1.3`) - the same bytes as
+  `CMD_PROC_READ`, sent as independently LZ4-compressed 64 KiB blocks
+  (incompressible blocks are sent as is, +4 bytes). Zero pages, tables and
+  code compress well (2.4-2.8x on host process-heap and code dumps); packed
+  assets do not. Any LZ4 block decoder works on the client side; see
+  `PROTOCOL.md` for the frame layout and a reference decoder.
 - **Bulk write / freeze** (`0xBDAACC04`) - apply many `{address, length, bytes}`
   writes in one exchange (the write counterpart to bulk-read), collapsing a
   freeze / multi-poke loop into a single round-trip with content-verified
@@ -347,11 +353,11 @@ lives in one place.)
 | Namespace     | Count | Examples                                                       |
 |---------------|-------|----------------------------------------------------------------|
 | Info / ping   | 5     | `VERSION`, `FW_VERSION`, `BRANDING`, `PLATFORM_ID`, `NOP`      |
-| Process       | 34    | `READ`, `WRITE`, bulk-write, `MAPS`, `CALL`, `SCAN_*`, Turbo `*` (incl. CANCEL), `DISASM_*`, assemble |
+| Process       | 35    | `READ`, LZ4 read, `WRITE`, bulk-write, `MAPS`, `CALL`, `SCAN_*`, Turbo `*` (incl. CANCEL), `DISASM_*`, assemble |
 | Debug         | 20    | `ATTACH`, `SET_BREAKPOINT`, `GETREGS`, FS/GS-base, `STEP`, `CONTINUE` |
 | Kernel R/W    | 3     | `KERN_BASE`, `KERN_READ`, `KERN_WRITE`                         |
 | Console       | 6     | `NOTIFY`, `PRINT`, `REBOOT`, `INFO`, `END`, foreground-app     |
-| **Total**     | **68**| The newest commands are dispatched as raw hex literals with no `CMD_*` macro (some clients enumerate the macro set). Excludes 3 dev-only diagnostics stripped from release builds. |
+| **Total**     | **69**| The newest commands are dispatched as raw hex literals with no `CMD_*` macro (some clients enumerate the macro set). Excludes 3 dev-only diagnostics stripped from release builds. |
 
 ---
 
@@ -419,6 +425,7 @@ every command, response, and async interrupt packet.
 │   ├── source/              # server, proc, debug, kern, net, console handlers
 │   ├── include/             # protocol.h, debug.h, kern.h, ...
 │   ├── third_party/zydis/   # Zydis amalgamation (decoder-only)
+│   ├── third_party/lz4/     # LZ4 1.9.4 block compressor (0xBDAACC18)
 │   └── PROTOCOL.md          # pointer to the root PROTOCOL.md (canonical spec)
 │
 ├── kdebugger/               # kernel module (installs sys_proc_* / sys_kern_*)
@@ -441,6 +448,8 @@ two SDK trees), so a clean checkout builds without fetching anything:
 - **Keystone** 0.9.2-based fork - the on-console x86-64 assembler (`0xBDAA0024`),
   built x86-only (`-fno-exceptions -fno-rtti`, static).
 - **Zydis** amalgamation - decoder-only disassembler (`ZYAN_NO_LIBC`, `-DNDEBUG`).
+- **LZ4** 1.9.4 (`debugger/third_party/lz4`, BSD 2-Clause, unmodified) - block
+  compressor for the compressed read `0xBDAACC18`, built `LZ4_FREESTANDING`.
 - **libc++ / libc++abi / libunwind** (`debugger/third_party/cxxrt`) - the C++
   runtime the Keystone C++ translation units link against.
 - **libPS4** (`ps4-payload-sdk`) - freestanding userland runtime; **libKSDK**
